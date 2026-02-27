@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Models (too large for git)
+models/*.gguf
+models/*.bin
+!models/.gitkeep
+
+# Build outputs
+src/app/dist/
+src/app/android/app/build/
+*.apk
+*.aab
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
