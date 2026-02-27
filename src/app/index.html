@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Nova</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #000000;
+            --bg-secondary: #0a0a0a;
+            --surface: #1a1a1a;
+            --surface-light: #2a2a2a;
+            --text-primary: #f0f0f0;
+            --text-secondary: #8a8a8a;
+            --accent-blue: #3b82f6;
+            --accent-blue-dark: #2563eb;
+            --accent-glow: rgba(59, 130, 246, 0.3);
+            --nova-glow: rgba(59, 130, 246, 0.15);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            height: 100dvh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* ── Header ── */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px 20px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            position: relative;
+            z-index: 10;
+        }
+
+        .header-title {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            background: linear-gradient(135deg, #f0f0f0 0%, #3b82f6 50%, #f0f0f0 100%);
+            background-size: 200% 200%;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            animation: shimmer 4s ease-in-out infinite;
+            text-shadow: none;
+            position: relative;
+        }
+
+        .header-title::after {
+            content: 'NOVA';
+            position: absolute;
+            left: 0;
+            top: 0;
+            filter: blur(12px);
+            opacity: 0.4;
+            color: var(--accent-blue);
+            -webkit-text-fill-color: var(--accent-blue);
+            background: none;
+            -webkit-background-clip: unset;
+            letter-spacing: 3px;
+            font-size: 20px;
+            font-weight: 700;
+            text-transform: uppercase;
+            animation: pulse-glow 3s ease-in-out infinite;
+        }
+
+        @keyframes shimmer {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+
+        @keyframes pulse-glow {
+            0%, 100% { opacity: 0.3; filter: blur(12px); }
+            50% { opacity: 0.6; filter: blur(16px); }
+        }
+
+        .header-status {
+            font-size: 11px;
+            color: var(--text-secondary);
+            position: absolute;
+            bottom: 4px;
+            letter-spacing: 0.5px;
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #22c55e;
+            margin-right: 4px;
+            animation: status-pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes status-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /* ── Chat Area ── */
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 16px 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            scroll-behavior: smooth;
+            scrollbar-width: none;
+        }
+
+        .chat-container::-webkit-scrollbar {
+            display: none;
+        }
+
+        .message-group {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            animation: messageIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            opacity: 0;
+            transform: translateY(12px);
+        }
+
+        @keyframes messageIn {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message {
+            max-width: 82%;
+            padding: 10px 14px;
+            border-radius: 18px;
+            font-size: 15px;
+            line-height: 1.45;
+            word-wrap: break-word;
+            position: relative;
+        }
+
+        .message.nova {
+            align-self: flex-start;
+            background: var(--surface);
+            color: var(--text-primary);
+            border-bottom-left-radius: 6px;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background: var(--accent-blue);
+            color: #ffffff;
+            border-bottom-right-radius: 6px;
+        }
+
+        .message-time {
+            font-size: 10px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+            padding: 0 4px;
+        }
+
+        .message-time.nova-time {
+            align-self: flex-start;
+        }
+
+        .message-time.user-time {
+            align-self: flex-end;
+        }
+
+        /* Typing indicator */
+        .typing-indicator {
+            display: flex;
+            gap: 4px;
+            padding: 12px 16px;
+            align-self: flex-start;
+            background: var(--surface);
+            border-radius: 18px;
+            border-bottom-left-radius: 6px;
+        }
+
+        .typing-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--text-secondary);
+            animation: typingBounce 1.4s ease-in-out infinite;
+        }
+
+        .typing-dot:nth-child(2) { animation-delay: 0.15s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.3s; }
+
+        @keyframes typingBounce {
+            0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+            30% { transform: translateY(-6px); opacity: 1; }
+        }
+
+        /* ── Input Area ── */
+        .input-container {
+            padding: 12px 16px;
+            padding-bottom: max(12px, env(safe-area-inset-bottom));
+            background: var(--bg-secondary);
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            display: flex;
+            align-items: flex-end;
+            gap: 8px;
+        }
+
+        .input-wrapper {
+            flex: 1;
+            display: flex;
+            align-items: flex-end;
+            background: var(--surface);
+            border-radius: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 4px 4px 4px 16px;
+            transition: border-color 0.2s ease;
+        }
+
+        .input-wrapper:focus-within {
+            border-color: rgba(59, 130, 246, 0.4);
+        }
+
+        .message-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-primary);
+            font-size: 15px;
+            font-family: inherit;
+            padding: 8px 0;
+            resize: none;
+            max-height: 120px;
+            line-height: 1.4;
+        }
+
+        .message-input::placeholder {
+            color: var(--text-secondary);
+        }
+
+        .btn {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            border: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            flex-shrink: 0;
+        }
+
+        .btn-send {
+            background: var(--accent-blue);
+            color: white;
+        }
+
+        .btn-send:hover {
+            background: var(--accent-blue-dark);
+            transform: scale(1.05);
+        }
+
+        .btn-send:active {
+            transform: scale(0.95);
+        }
+
+        .btn-send svg {
+            width: 18px;
+            height: 18px;
+            margin-left: 1px;
+        }
+
+        .btn-mic {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1.5px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .btn-mic:hover {
+            color: var(--text-primary);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .btn-mic.recording {
+            color: #ef4444;
+            border-color: #ef4444;
+            animation: recording-pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes recording-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.3); }
+            50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+        }
+
+        .btn-mic svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        /* ── Date Divider ── */
+        .date-divider {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin: 12px 0;
+            opacity: 0;
+            animation: messageIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+
+        .date-divider::before,
+        .date-divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        .date-divider span {
+            font-size: 11px;
+            color: var(--text-secondary);
+            letter-spacing: 0.5px;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Header -->
+    <div class="header">
+        <div class="header-title">Nova</div>
+    </div>
+
+    <!-- Chat Area -->
+    <div class="chat-container" id="chatContainer">
+        <!-- Messages are injected here -->
+    </div>
+
+    <!-- Input Area -->
+    <div class="input-container">
+        <button class="btn btn-mic" id="micBtn" title="Voice input">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="22"/>
+            </svg>
+        </button>
+        <div class="input-wrapper">
+            <textarea class="message-input" id="messageInput" placeholder="Message Nova..." rows="1"></textarea>
+            <button class="btn btn-send" id="sendBtn" title="Send message">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13"/>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // ── State ──
+        const chatContainer = document.getElementById('chatContainer');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const micBtn = document.getElementById('micBtn');
+        let messageIndex = 0;
+
+        // ── Demo Conversation ──
+        const demoConversation = [
+            { role: 'nova', text: "Hey! Good to see you. How's your day going so far?", time: '11:02 PM' },
+            { role: 'user', text: "Pretty good actually, just finished a long coding session", time: '11:02 PM' },
+            { role: 'nova', text: "Nice — what were you working on? Last time you mentioned you were building out the inference engine. Did you get the token speeds up?", time: '11:03 PM' },
+            { role: 'user', text: "Yeah! Got it to 11 tokens/sec on the test device. Feels smooth now", time: '11:03 PM' },
+            { role: 'nova', text: "11 tok/s — that's solid for a 3B model on mobile. You were at like 6-7 last week right? What changed?", time: '11:03 PM' },
+            { role: 'user', text: "Switched to Q4_K_M quant and enabled NEON. Huge difference", time: '11:04 PM' },
+            { role: 'nova', text: "Smart move. Q4_K_M is the sweet spot — barely any quality loss but way faster. Have you tried a longer conversation yet to see if the KV cache holds up?", time: '11:04 PM' },
+        ];
+
+        // ── Render Functions ──
+        function createMessageElement(role, text, time) {
+            const group = document.createElement('div');
+            group.className = 'message-group';
+            group.style.animationDelay = `${messageIndex * 0.08}s`;
+
+            const msg = document.createElement('div');
+            msg.className = `message ${role}`;
+            msg.textContent = text;
+
+            const timeEl = document.createElement('div');
+            timeEl.className = `message-time ${role}-time`;
+            timeEl.textContent = time;
+
+            group.appendChild(msg);
+            group.appendChild(timeEl);
+            messageIndex++;
+            return group;
+        }
+
+        function createTypingIndicator() {
+            const group = document.createElement('div');
+            group.className = 'message-group';
+            group.id = 'typingIndicator';
+
+            const indicator = document.createElement('div');
+            indicator.className = 'typing-indicator';
+            for (let i = 0; i < 3; i++) {
+                const dot = document.createElement('div');
+                dot.className = 'typing-dot';
+                indicator.appendChild(dot);
+            }
+            group.appendChild(indicator);
+            return group;
+        }
+
+        function addDateDivider(text) {
+            const divider = document.createElement('div');
+            divider.className = 'date-divider';
+            divider.innerHTML = `<span>${text}</span>`;
+            chatContainer.appendChild(divider);
+        }
+
+        function scrollToBottom() {
+            chatContainer.scrollTo({
+                top: chatContainer.scrollHeight,
+                behavior: 'smooth'
+            });
+        }
+
+        // ── Load Demo ──
+        function loadDemo() {
+            addDateDivider('Today');
+            demoConversation.forEach((msg, i) => {
+                const el = createMessageElement(msg.role, msg.text, msg.time);
+                el.style.animationDelay = `${i * 0.12}s`;
+                chatContainer.appendChild(el);
+            });
+            setTimeout(scrollToBottom, 200);
+        }
+
+        // ── Send Message ──
+        function sendMessage() {
+            const text = messageInput.value.trim();
+            if (!text) return;
+
+            // Add user message
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+            const userMsg = createMessageElement('user', text, timeStr);
+            chatContainer.appendChild(userMsg);
+            messageInput.value = '';
+            autoResize();
+            scrollToBottom();
+
+            // Show typing indicator
+            setTimeout(() => {
+                const typing = createTypingIndicator();
+                chatContainer.appendChild(typing);
+                scrollToBottom();
+
+                // Simulate Nova's response
+                setTimeout(() => {
+                    typing.remove();
+                    const responses = [
+                        "That's interesting — tell me more about that.",
+                        "I hear you. What are you thinking of doing next?",
+                        "Nice! That reminds me of something you mentioned last time.",
+                        "Hmm, let me think about that. Have you considered a different approach?",
+                        "Got it. How does that make you feel about things overall?",
+                    ];
+                    const response = responses[Math.floor(Math.random() * responses.length)];
+                    const novaMsg = createMessageElement('nova', response, timeStr);
+                    chatContainer.appendChild(novaMsg);
+                    scrollToBottom();
+                }, 1200 + Math.random() * 800);
+            }, 300);
+        }
+
+        // ── Auto-resize textarea ──
+        function autoResize() {
+            messageInput.style.height = 'auto';
+            messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
+        }
+
+        // ── Event Listeners ──
+        sendBtn.addEventListener('click', sendMessage);
+
+        messageInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        messageInput.addEventListener('input', autoResize);
+
+        micBtn.addEventListener('click', () => {
+            micBtn.classList.toggle('recording');
+            if (micBtn.classList.contains('recording')) {
+                // Placeholder: Start recording
+                setTimeout(() => {
+                    micBtn.classList.remove('recording');
+                    messageInput.value = "This is a demo voice transcription";
+                    autoResize();
+                    messageInput.focus();
+                }, 3000);
+            }
+        });
+
+        // ── Init ──
+        loadDemo();
+    </script>
+</body>
+</html>
