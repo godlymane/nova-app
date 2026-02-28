@@ -13,13 +13,13 @@
     <!-- Notifications (required on Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Boot completed to reschedule notifications after reboot -->
+    <!-- Boot completed to reschedule notifications after reboot and start wake word service -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- Voice input: microphone access for Whisper STT and ElevenLabs -->
+    <!-- Voice input: microphone access for Whisper STT, ElevenLabs, and wake word detection -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
-    <!-- Internet for cloud APIs (OpenAI, ElevenLabs, Gemini) -->
+    <!-- Internet for cloud APIs (OpenAI, ElevenLabs, Gemini, Anthropic) -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
@@ -40,6 +40,12 @@
     <!-- Vibrate for notifications -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- Foreground service permission (required for API 28+) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <!-- Foreground service microphone type (required for Android 14+ when using microphone in foreground service) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
     <!-- Declare hardware features (not required, for Play Store filtering) -->
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -54,7 +60,8 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Nova"
         android:largeHeap="true"
-        tools:targetApi="34">
+        android:enableOnBackInvokedCallback="true"
+        tools:targetApi="35">
 
         <activity
             android:name=".MainActivity"
@@ -67,7 +74,7 @@
             </intent-filter>
         </activity>
 
-        <!-- Boot receiver to reschedule notifications after reboot -->
+        <!-- Boot receiver to reschedule notifications and restart wake word service after reboot -->
         <receiver
             android:name=".notification.BootReceiver"
             android:exported="true">
@@ -75,5 +82,16 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!--
+            Wake word foreground service.
+            Uses foregroundServiceType="microphone" as required on Android 14+ (API 34)
+            for any foreground service that accesses the microphone.
+        -->
+        <service
+            android:name=".voice.WakeWordService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
     </application>
 </manifest>
