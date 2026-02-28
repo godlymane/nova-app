@@ -46,6 +46,9 @@
     <!-- Foreground service microphone type (required for Android 14+ when using microphone in foreground service) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
+    <!-- Wake lock for keeping CPU awake during wake word detection and voice processing -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <!-- Declare hardware features (not required, for Play Store filtering) -->
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
