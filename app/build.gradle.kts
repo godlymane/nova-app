@@ -18,15 +18,15 @@ fun getLocalProperty(key: String, defaultValue: String = ""): String {
 
 android {
     namespace = "com.nova.companion"
-    compileSdk = 34
+    compileSdk = 35
     ndkVersion = "26.3.11579264"
 
     defaultConfig {
         applicationId = "com.nova.companion"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        targetSdk = 35
+        versionCode = 2
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -39,6 +39,8 @@ android {
         buildConfigField("String", "ELEVENLABS_AGENT_ID", "\"${getLocalProperty("ELEVENLABS_AGENT_ID", "agent_1001kjg9ge5cem")}\"")
         buildConfigField("String", "OPENAI_API_KEY", "\"${getLocalProperty("OPENAI_API_KEY")}\"")
         buildConfigField("String", "GEMINI_API_KEY", "\"${getLocalProperty("GEMINI_API_KEY")}\"")
+        buildConfigField("String", "ANTHROPIC_API_KEY", "\"${getLocalProperty("ANTHROPIC_API_KEY")}\"")
+        buildConfigField("String", "PICOVOICE_ACCESS_KEY", "\"${getLocalProperty("PICOVOICE_ACCESS_KEY")}\"")
 
         ndk {
             // Target arm64 for on-device inference; add x86_64 for emulator testing
@@ -110,7 +112,7 @@ android {
 
 dependencies {
     // Core Android
-    implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")
@@ -149,9 +151,13 @@ dependencies {
     implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.animation:animation-graphics")
 
+    // Picovoice Porcupine — wake word detection
+    implementation("ai.picovoice:porcupine-android:3.0.2")
+
     // Debug
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+    debugImplementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
     // Test
     testImplementation("junit:junit:4.13.2")
