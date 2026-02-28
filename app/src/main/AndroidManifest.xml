@@ -58,6 +58,11 @@
     <!-- Foreground service type for ContextEngine -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!-- ========== OVERLAY PERMISSION ========== -->
+
+    <!-- System overlay for aura effect on top of all apps -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <!-- ========== CORE SYSTEM PERMISSIONS ========== -->
 
     <!-- Internet -->
@@ -124,6 +129,17 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Nova context collection for personalized assistance" />
+        </service>
+
+        <!-- ========== AURA OVERLAY SERVICE ========== -->
+
+        <service
+            android:name=".overlay.AuraOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Nova ambient aura visual overlay" />
         </service>
 
         <!-- ========== TIER 4 SERVICES ========== -->
