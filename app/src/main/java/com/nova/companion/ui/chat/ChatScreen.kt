@@ -1,22 +1,40 @@
 package com.nova.companion.ui.chat
 
-import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.os.Build
-import android.os.Environment
-import android.provider.Settings
 import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.*
-import androidx.compose.animation.core.*
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -29,12 +47,33 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -46,8 +85,27 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nova.companion.core.NovaMode
 import com.nova.companion.inference.NovaInference.ModelState
+import com.nova.companion.ui.aura.AuraState
+import com.nova.companion.ui.aura.NovaAuraEffect
+import com.nova.companion.ui.theme.NovaDarkGray
+import com.nova.companion.ui.theme.NovaBlack
+import com.nova.companion.ui.theme.NovaBlue
+import com.nova.companion.ui.theme.NovaGreen
+import com.nova.companion.ui.theme.NovaOrange
+import com.nova.companion.ui.theme.NovaPurpleAmbient
+import com.nova.companion.ui.theme.NovaPurpleCore
+import com.nova.companion.ui.theme.NovaPurpleDeep
+import com.nova.companion.ui.theme.NovaPurpleGlow
+import com.nova.companion.ui.theme.NovaRed
+import com.nova.companion.ui.theme.NovaSurface
+import com.nova.companion.ui.theme.NovaSurfaceVariant
+import com.nova.companion.ui.theme.NovaTextDim
+import com.nova.companion.ui.theme.NovaTextSecondary
 import com.nova.companion.voice.ElevenLabsVoiceService
-import com.nova.companion.ui.theme.*
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ChatScreen root
+// ─────────────────────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,95 +118,65 @@ fun ChatScreen(
     val isGenerating by viewModel.isGenerating.collectAsState()
     val modelState by viewModel.modelState.collectAsState()
     val loadProgress by viewModel.loadProgress.collectAsState()
-    val settings by viewModel.settings.collectAsState()
     val currentMode by viewModel.currentMode.collectAsState()
     val isVoiceActive by viewModel.isVoiceActive.collectAsState()
     val elevenLabsState by viewModel.elevenLabsConnectionState.collectAsState()
     val isElevenLabsSpeaking by viewModel.isElevenLabsSpeaking.collectAsState()
+    val auraState by viewModel.auraState.collectAsState()
 
     val listState = rememberLazyListState()
 
     // Auto-scroll when new messages arrive or streaming updates
     LaunchedEffect(messages.size, streamingText) {
         if (messages.isNotEmpty() || streamingText.isNotEmpty()) {
-            val totalItems = messages.size + (if (streamingText.isNotEmpty() || isGenerating) 1 else 0)
+            val totalItems =
+                messages.size + (if (streamingText.isNotEmpty() || isGenerating) 1 else 0)
             if (totalItems > 0) {
                 listState.animateScrollToItem((totalItems - 1).coerceAtLeast(0))
             }
         }
     }
 
-    Scaffold(
-        topBar = {
-            NovaTopBar(
-                modelState = modelState,
-                currentMode = currentMode,
-                onSettingsClick = onNavigateToSettings
-            )
-        },
-        containerColor = NovaBlack
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .background(NovaBlack)
-        ) {
-            // Loading progress bar
-            AnimatedVisibility(visible = modelState == ModelState.LOADING) {
-                LinearProgressIndicator(
-                    progress = { loadProgress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(3.dp),
-                    color = NovaBlue,
-                    trackColor = NovaDarkGray
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            topBar = {
+                NovaTopBar(
+                    currentMode = currentMode,
+                    onSettingsClick = onNavigateToSettings
                 )
-            }
-
-            // Main content
-            when (modelState) {
-                ModelState.UNLOADED, ModelState.ERROR -> {
-                    ModelLoadSection(
-                        modelState = modelState,
-                        errorMessage = viewModel.errorMessage.collectAsState().value,
-                        availableModels = settings.availableModels,
-                        onLoadModel = { viewModel.loadModel(it) },
-                        onScan = { viewModel.scanForModels() }
+            },
+            containerColor = NovaBlack
+        ) { paddingValues ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+                    .background(NovaBlack)
+            ) {
+                // Subtle model-loading progress bar — visible only while loading
+                AnimatedVisibility(visible = modelState == ModelState.LOADING) {
+                    LinearProgressIndicator(
+                        progress = { loadProgress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(2.dp),
+                        color = NovaPurpleCore,
+                        trackColor = NovaSurface
                     )
                 }
 
-                ModelState.LOADING -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CircularProgressIndicator(color = NovaBlue)
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                "Loading model... ${(loadProgress * 100).toInt()}%",
-                                color = NovaTextSecondary,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
-                    }
-                }
-
-                ModelState.READY, ModelState.GENERATING -> {
-                    // Chat messages
+                // Chat messages area — always shown regardless of model state
+                Box(modifier = Modifier.weight(1f)) {
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
+                        modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        // Empty state
-                        if (messages.isEmpty() && streamingText.isEmpty()) {
+                        // Beautiful empty state
+                        if (messages.isEmpty() && streamingText.isEmpty() && !isGenerating) {
                             item(key = "empty") {
-                                EmptyStateMessage()
+                                NovaEmptyState(currentMode = currentMode)
                             }
                         }
 
@@ -179,35 +207,44 @@ fun ChatScreen(
                             }
                         }
                     }
+                }
 
-                    // Voice mode overlay
-                    if (isVoiceActive && currentMode == NovaMode.VOICE_ELEVEN) {
-                        VoiceModeOverlay(
-                            connectionState = elevenLabsState,
-                            isSpeaking = isElevenLabsSpeaking,
-                            onEndCall = { viewModel.stopVoiceMode() }
-                        )
-                    }
-
-                    // Input bar
-                    ChatInputBar(
-                        isGenerating = isGenerating,
-                        currentMode = currentMode,
-                        isVoiceActive = isVoiceActive,
-                        onSend = { viewModel.sendMessage(it) },
-                        onCancel = { viewModel.cancelGeneration() },
-                        onVoiceToggle = { viewModel.toggleVoiceMode() }
+                // Voice mode overlay — shown above input bar when ElevenLabs is active
+                AnimatedVisibility(visible = isVoiceActive && currentMode == NovaMode.VOICE_ELEVEN) {
+                    VoiceModeOverlay(
+                        connectionState = elevenLabsState,
+                        isSpeaking = isElevenLabsSpeaking,
+                        onEndCall = { viewModel.stopVoiceMode() }
                     )
                 }
+
+                // Input bar
+                ChatInputBar(
+                    isGenerating = isGenerating,
+                    currentMode = currentMode,
+                    isVoiceActive = isVoiceActive,
+                    onSend = { viewModel.sendMessage(it) },
+                    onCancel = { viewModel.cancelGeneration() },
+                    onVoiceToggle = { viewModel.toggleVoiceMode() }
+                )
             }
         }
+
+        // Aura overlay — sits on top of everything as a full-screen overlay
+        NovaAuraEffect(
+            auraState = auraState,
+            modifier = Modifier.fillMaxSize()
+        )
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Top bar
+// ─────────────────────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NovaTopBar(
-    modelState: ModelState,
     currentMode: NovaMode,
     onSettingsClick: () -> Unit
 ) {
@@ -223,29 +260,26 @@ private fun NovaTopBar(
                     color = Color.White
                 )
                 Spacer(modifier = Modifier.width(10.dp))
-                // Mode badge
+
+                // Mode badge — always visible to reflect routing state
                 val (badgeText, badgeColor) = when (currentMode) {
                     NovaMode.TEXT_LOCAL -> "Local" to NovaGreen
                     NovaMode.TEXT_CLOUD -> "Cloud" to NovaBlue
-                    NovaMode.VOICE_ELEVEN -> "Voice" to NovaOrange
-                    NovaMode.VOICE_LOCAL -> "Voice Local" to NovaGreen
-                    NovaMode.AUTOMATION -> "Auto" to Color(0xFFBB86FC)
+                    NovaMode.VOICE_ELEVEN -> "Voice" to NovaPurpleCore
+                    NovaMode.VOICE_LOCAL -> "Voice" to NovaGreen
+                    NovaMode.AUTOMATION -> "Auto" to NovaOrange
                 }
-                if (modelState == ModelState.READY || modelState == ModelState.GENERATING ||
-                    currentMode == NovaMode.VOICE_ELEVEN || currentMode == NovaMode.AUTOMATION
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = badgeColor.copy(alpha = 0.15f)
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = badgeColor.copy(alpha = 0.15f)
-                    ) {
-                        Text(
-                            text = badgeText,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = badgeColor,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
+                    Text(
+                        text = badgeText,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = badgeColor,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             }
         },
@@ -265,9 +299,111 @@ private fun NovaTopBar(
     )
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Empty state
+// ─────────────────────────────────────────────────────────────────────────────
+
+private val suggestionChips = listOf(
+    "Tell me a joke",
+    "Play some music",
+    "What's the weather like?",
+    "Help me focus"
+)
+
+@Composable
+private fun NovaEmptyState(currentMode: NovaMode) {
+    // Breathing animation for subtitle
+    val breathTransition = rememberInfiniteTransition(label = "breathe")
+    val subtitleAlpha by breathTransition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2200, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "subtitleAlpha"
+    )
+    val subtitleScale by breathTransition.animateFloat(
+        initialValue = 0.98f,
+        targetValue = 1.02f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2200, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "subtitleScale"
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 96.dp, start = 24.dp, end = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Large Nova title
+        Text(
+            text = "Nova",
+            style = MaterialTheme.typography.headlineLarge.copy(
+                fontWeight = FontWeight.Bold,
+                fontSize = 52.sp,
+                letterSpacing = (-1).sp
+            ),
+            color = NovaPurpleCore
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Breathing subtitle
+        Text(
+            text = "What's on your mind?",
+            style = MaterialTheme.typography.bodyLarge.copy(
+                fontSize = 17.sp
+            ),
+            color = NovaTextSecondary.copy(alpha = subtitleAlpha),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.scale(subtitleScale)
+        )
+
+        Spacer(modifier = Modifier.height(40.dp))
+
+        // Suggestion chips
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            suggestionChips.chunked(2).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    row.forEach { chip ->
+                        SuggestionChip(label = chip)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SuggestionChip(label: String) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = NovaSurfaceVariant.copy(alpha = 0.6f),
+        modifier = Modifier
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = NovaTextSecondary,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Message bubbles
+// ─────────────────────────────────────────────────────────────────────────────
+
 @Composable
 private fun MessageBubbleAnimated(message: ChatMessage) {
-    // Slide in from bottom animation
     var visible by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { visible = true }
 
@@ -290,43 +426,68 @@ private fun ChatBubble(
     val context = LocalContext.current
     val isUser = message.isUser
 
+    // Route tag badge color
+    val routeColor: Color? = when (message.routeTag) {
+        "cloud" -> NovaBlue.copy(alpha = 0.7f)
+        "local" -> NovaGreen.copy(alpha = 0.7f)
+        "voice" -> NovaPurpleCore.copy(alpha = 0.7f)
+        else -> null
+    }
+
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
-        Surface(
-            shape = RoundedCornerShape(
-                topStart = 18.dp,
-                topEnd = 18.dp,
-                bottomStart = if (isUser) 18.dp else 4.dp,
-                bottomEnd = if (isUser) 4.dp else 18.dp
-            ),
-            color = if (isUser) NovaBlue else NovaDarkGray,
-            modifier = Modifier
-                .widthIn(max = 300.dp)
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onLongPress = {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(
-                                ClipData.newPlainText("message", message.content)
-                            )
-                            Toast
-                                .makeText(context, "Copied", Toast.LENGTH_SHORT)
-                                .show()
-                        }
-                    )
-                }
+        Column(
+            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
         ) {
-            Text(
-                text = if (message.isStreaming) "${message.content}\u2588" else message.content,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                color = Color.White,
-                style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 22.sp)
-            )
+            Surface(
+                shape = RoundedCornerShape(
+                    topStart = 18.dp,
+                    topEnd = 18.dp,
+                    bottomStart = if (isUser) 18.dp else 4.dp,
+                    bottomEnd = if (isUser) 4.dp else 18.dp
+                ),
+                color = if (isUser) NovaBlue else NovaDarkGray,
+                modifier = Modifier
+                    .widthIn(max = 300.dp)
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onLongPress = {
+                                val clipboard =
+                                    context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(
+                                    ClipData.newPlainText("message", message.content)
+                                )
+                                Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
+            ) {
+                Text(
+                    text = if (message.isStreaming) "${message.content}\u2588" else message.content,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 22.sp)
+                )
+            }
+
+            // Small route tag badge
+            if (routeColor != null && message.routeTag != null) {
+                Text(
+                    text = message.routeTag,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = routeColor,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                )
+            }
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Typing indicator
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
 private fun TypingIndicator() {
@@ -362,11 +523,15 @@ private fun TypingIndicator() {
                     .offset(y = offsetY.dp)
                     .size(8.dp)
                     .clip(CircleShape)
-                    .background(NovaTextSecondary.copy(alpha = alpha))
+                    .background(NovaPurpleCore.copy(alpha = alpha))
             )
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Input bar
+// ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
 private fun ChatInputBar(
@@ -386,16 +551,26 @@ private fun ChatInputBar(
         label = "sendScale"
     )
 
-    // Pulse animation for active voice
+    // Pulse animation for active voice mic
     val infiniteTransition = rememberInfiniteTransition(label = "voicePulse")
     val voicePulse by infiniteTransition.animateFloat(
         initialValue = 1f,
-        targetValue = 1.15f,
+        targetValue = 1.18f,
         animationSpec = infiniteRepeatable(
-            animation = tween(800),
+            animation = tween(900, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulse"
+    )
+    // Glow alpha for mic button halo
+    val micGlowAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 0.55f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "micGlow"
     )
 
     Surface(
@@ -410,33 +585,57 @@ private fun ChatInputBar(
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            // Voice mode button
-            IconButton(
-                onClick = onVoiceToggle,
-                modifier = Modifier
-                    .size(42.dp)
-                    .then(
-                        if (isVoiceActive) Modifier
-                            .scale(voicePulse)
-                            .background(NovaOrange.copy(alpha = 0.2f), CircleShape)
-                        else Modifier
-                    )
+            // Mic / voice toggle button
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.size(42.dp)
             ) {
-                Icon(
-                    imageVector = if (isVoiceActive) Icons.Default.Stop else Icons.Default.Mic,
-                    contentDescription = if (isVoiceActive) "End voice" else "Start voice",
-                    tint = if (isVoiceActive) NovaOrange else NovaTextSecondary
-                )
+                // Purple glow halo behind mic button when voice active
+                if (isVoiceActive) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .scale(voicePulse)
+                            .background(
+                                brush = Brush.radialGradient(
+                                    colors = listOf(
+                                        NovaPurpleGlow.copy(alpha = micGlowAlpha),
+                                        Color.Transparent
+                                    )
+                                ),
+                                shape = CircleShape
+                            )
+                    )
+                }
+                IconButton(
+                    onClick = onVoiceToggle,
+                    modifier = Modifier
+                        .size(42.dp)
+                        .then(
+                            if (isVoiceActive)
+                                Modifier
+                                    .scale(1f)
+                                    .background(NovaPurpleDeep.copy(alpha = 0.35f), CircleShape)
+                            else
+                                Modifier
+                        )
+                ) {
+                    Icon(
+                        imageVector = if (isVoiceActive) Icons.Default.Stop else Icons.Default.Mic,
+                        contentDescription = if (isVoiceActive) "End voice" else "Start voice",
+                        tint = if (isVoiceActive) NovaPurpleCore else NovaTextSecondary
+                    )
+                }
             }
 
-            // Text input
+            // Text input field
             TextField(
                 value = inputText,
                 onValueChange = { inputText = it },
                 modifier = Modifier.weight(1f),
                 placeholder = {
                     Text(
-                        when {
+                        text = when {
                             isVoiceActive -> "Voice mode active..."
                             currentMode == NovaMode.AUTOMATION -> "Ask Nova to do something..."
                             else -> "Talk to Nova..."
@@ -449,7 +648,7 @@ private fun ChatInputBar(
                     unfocusedContainerColor = NovaDarkGray,
                     focusedTextColor = Color.White,
                     unfocusedTextColor = Color.White,
-                    cursorColor = NovaBlue,
+                    cursorColor = NovaPurpleCore,
                     focusedIndicatorColor = Color.Transparent,
                     unfocusedIndicatorColor = Color.Transparent
                 ),
@@ -496,7 +695,8 @@ private fun ChatInputBar(
                         .size(42.dp)
                         .scale(sendButtonScale)
                         .background(
-                            if (inputText.isNotBlank()) NovaBlue else NovaBlue.copy(alpha = 0.3f),
+                            if (inputText.isNotBlank()) NovaPurpleCore
+                            else NovaPurpleCore.copy(alpha = 0.3f),
                             CircleShape
                         ),
                     enabled = inputText.isNotBlank()
@@ -512,6 +712,10 @@ private fun ChatInputBar(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Voice mode overlay
+// ─────────────────────────────────────────────────────────────────────────────
+
 @Composable
 private fun VoiceModeOverlay(
     connectionState: ElevenLabsVoiceService.ConnectionState,
@@ -520,42 +724,48 @@ private fun VoiceModeOverlay(
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "voiceWave")
 
+    val statusText = when (connectionState) {
+        ElevenLabsVoiceService.ConnectionState.CONNECTING -> "Connecting..."
+        ElevenLabsVoiceService.ConnectionState.CONNECTED ->
+            if (isSpeaking) "Nova is speaking..." else "Listening..."
+        ElevenLabsVoiceService.ConnectionState.ERROR -> "Connection error"
+        ElevenLabsVoiceService.ConnectionState.DISCONNECTED -> "Disconnected"
+    }
+    val statusColor = when (connectionState) {
+        ElevenLabsVoiceService.ConnectionState.CONNECTED ->
+            if (isSpeaking) NovaPurpleCore else NovaPurpleGlow
+        ElevenLabsVoiceService.ConnectionState.CONNECTING -> NovaPurpleAmbient
+        ElevenLabsVoiceService.ConnectionState.ERROR -> NovaRed
+        ElevenLabsVoiceService.ConnectionState.DISCONNECTED -> NovaTextDim
+    }
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(16.dp),
-        color = NovaDarkGray
+        shape = RoundedCornerShape(20.dp),
+        color = NovaSurface
     ) {
         Column(
             modifier = Modifier.padding(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Connection status
-            val statusText = when (connectionState) {
-                ElevenLabsVoiceService.ConnectionState.CONNECTING -> "Connecting..."
-                ElevenLabsVoiceService.ConnectionState.CONNECTED -> if (isSpeaking) "Nova is speaking..." else "Listening..."
-                ElevenLabsVoiceService.ConnectionState.ERROR -> "Connection error"
-                ElevenLabsVoiceService.ConnectionState.DISCONNECTED -> "Disconnected"
-            }
-            val statusColor = when (connectionState) {
-                ElevenLabsVoiceService.ConnectionState.CONNECTED -> if (isSpeaking) NovaOrange else NovaGreen
-                ElevenLabsVoiceService.ConnectionState.CONNECTING -> NovaBlue
-                ElevenLabsVoiceService.ConnectionState.ERROR -> NovaRed
-                ElevenLabsVoiceService.ConnectionState.DISCONNECTED -> NovaTextDim
-            }
-
-            // Animated waveform dots
+            // Animated waveform bars
             Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                repeat(5) { index ->
-                    val height by infiniteTransition.animateFloat(
-                        initialValue = 8f,
-                        targetValue = if (connectionState == ElevenLabsVoiceService.ConnectionState.CONNECTED) 28f else 12f,
+                repeat(7) { index ->
+                    val isActive =
+                        connectionState == ElevenLabsVoiceService.ConnectionState.CONNECTED
+                    val barHeight by infiniteTransition.animateFloat(
+                        initialValue = if (isActive) 6f else 4f,
+                        targetValue = if (isActive) 32f else 8f,
                         animationSpec = infiniteRepeatable(
-                            animation = tween(400 + index * 80, easing = FastOutSlowInEasing),
+                            animation = tween(
+                                durationMillis = 350 + index * 70,
+                                easing = FastOutSlowInEasing
+                            ),
                             repeatMode = RepeatMode.Reverse
                         ),
                         label = "bar_$index"
@@ -563,14 +773,17 @@ private fun VoiceModeOverlay(
                     Box(
                         modifier = Modifier
                             .width(4.dp)
-                            .height(height.dp)
+                            .height(barHeight.dp)
                             .clip(RoundedCornerShape(2.dp))
-                            .background(statusColor)
+                            .background(
+                                if (isActive) statusColor
+                                else NovaSurfaceVariant
+                            )
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
             Text(
                 text = statusText,
@@ -579,7 +792,7 @@ private fun VoiceModeOverlay(
                 fontWeight = FontWeight.SemiBold
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(18.dp))
 
             // End call button
             Button(
@@ -595,230 +808,6 @@ private fun VoiceModeOverlay(
                     tint = Color.White,
                     modifier = Modifier.size(28.dp)
                 )
-            }
-        }
-    }
-}
-
-@Composable
-private fun EmptyStateMessage() {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 120.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = "Nova",
-                style = MaterialTheme.typography.headlineLarge.copy(
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 36.sp
-                ),
-                color = NovaBlue
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "Your AI companion, running locally",
-                style = MaterialTheme.typography.bodyMedium,
-                color = NovaTextDim,
-                textAlign = TextAlign.Center
-            )
-        }
-    }
-}
-
-@Composable
-private fun ModelLoadSection(
-    modelState: ModelState,
-    errorMessage: String?,
-    availableModels: List<java.io.File>,
-    onLoadModel: (String?) -> Unit,
-    onScan: () -> Unit
-) {
-    val context = LocalContext.current
-
-    // Check if we have storage permission
-    val hasStorageAccess = remember {
-        mutableStateOf(
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                Environment.isExternalStorageManager()
-            } else {
-                true
-            }
-        )
-    }
-
-    // File picker launcher
-    val filePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let {
-            // Copy the file to app-private storage so native code can read it
-            try {
-                val inputStream = context.contentResolver.openInputStream(uri)
-                val fileName = "selected_model.gguf"
-                val destFile = java.io.File(context.filesDir, fileName)
-                inputStream?.use { input ->
-                    destFile.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
-                }
-                onLoadModel(destFile.absolutePath)
-            } catch (e: Exception) {
-                android.util.Log.e("ChatScreen", "Failed to copy model from picker", e)
-            }
-        }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(
-            text = "Nova",
-            style = MaterialTheme.typography.headlineLarge.copy(
-                fontWeight = FontWeight.Bold,
-                fontSize = 40.sp
-            ),
-            color = NovaBlue
-        )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        if (errorMessage != null) {
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = NovaRed.copy(alpha = 0.1f)
-            ) {
-                Text(
-                    text = errorMessage,
-                    modifier = Modifier.padding(16.dp),
-                    color = NovaRed,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-
-        // Show storage permission warning if needed
-        if (!hasStorageAccess.value) {
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = Color(0xFF332800)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Storage access needed to find model files",
-                        color = Color(0xFFFFB74D),
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    TextButton(
-                        onClick = {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                try {
-                                    val intent = Intent(
-                                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                                        Uri.parse("package:${context.packageName}")
-                                    )
-                                    context.startActivity(intent)
-                                } catch (e: Exception) {
-                                    context.startActivity(
-                                        Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                                    )
-                                }
-                            }
-                        }
-                    ) {
-                        Text("Grant Storage Access", color = Color(0xFFFFB74D))
-                    }
-                }
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-
-        Text(
-            text = "Copy a .gguf model to your Downloads folder\nthen tap Load Model",
-            style = MaterialTheme.typography.bodyMedium,
-            color = NovaTextSecondary,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Button(
-            onClick = {
-                // Re-check permission before loading
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    hasStorageAccess.value = Environment.isExternalStorageManager()
-                }
-                onLoadModel(null)
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp),
-            shape = RoundedCornerShape(14.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = NovaBlue)
-        ) {
-            Text(
-                "Load Model",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Browse files button as fallback
-        OutlinedButton(
-            onClick = {
-                filePickerLauncher.launch(arrayOf("application/octet-stream", "*/*"))
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp),
-            shape = RoundedCornerShape(14.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = NovaBlue)
-        ) {
-            Text(
-                "Browse Files",
-                style = MaterialTheme.typography.titleMedium
-            )
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        TextButton(onClick = {
-            // Re-check permission on scan
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                hasStorageAccess.value = Environment.isExternalStorageManager()
-            }
-            onScan()
-        }) {
-            Text("Scan for models", color = NovaBlue)
-        }
-
-        if (availableModels.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                "Found models:",
-                color = NovaTextSecondary,
-                style = MaterialTheme.typography.labelMedium
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            availableModels.forEach { file ->
-                TextButton(onClick = { onLoadModel(file.absolutePath) }) {
-                    Text(
-                        "${file.name} (${file.length() / 1_000_000}MB)",
-                        color = NovaBlue,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
             }
         }
     }

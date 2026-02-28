@@ -22,3 +22,11 @@ val NovaTextDim = Color(0xFF636366)
 val NovaGreen = Color(0xFF30D158)
 val NovaRed = Color(0xFFFF453A)
 val NovaOrange = Color(0xFFFF9F0A)
+
+// Purple palette — used for Nova's aura, mic glow, and accent accents
+val NovaPurpleCore = Color(0xFF9B59F5)       // Primary purple accent
+val NovaPurpleGlow = Color(0xFFB97BFF)       // Lighter glow variant
+val NovaPurpleDeep = Color(0xFF5B21B6)       // Deep background purple
+val NovaPurpleMagenta = Color(0xFFD946EF)    // Magenta-purple for SURGE
+val NovaPurpleAmbient = Color(0xFF7C3AED)    // Ambient / connecting state
+val NovaPurpleElectric = Color(0xFFA855F7)   // High-energy electric purple
