@@ -69,233 +69,253 @@ fun NovaTestScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text("Nova", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                            // Voice mode toggle in title bar
-                            if (modelState == ModelState.READY || modelState == ModelState.GENERATING) {
-                                VoiceModeToggle(
-                                    isVoiceMode = isVoiceMode,
-                                    onToggle = { viewModel.toggleVoiceMode() },
-                                    isLoading = isVoiceLoading
-                                )
+    // ── Root Box: wraps Scaffold + EdgeLightEffect overlay ────────────
+    Box(modifier = Modifier.fillMaxSize()) {
+
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text("Nova", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                                // Voice mode toggle in title bar
+                                if (modelState == ModelState.READY || modelState == ModelState.GENERATING) {
+                                    VoiceModeToggle(
+                                        isVoiceMode = isVoiceMode,
+                                        onToggle = { viewModel.toggleVoiceMode() },
+                                        isLoading = isVoiceLoading
+                                    )
+                                }
                             }
+                            Text(
+                                text = when {
+                                    isVoiceMode && voiceState != VoiceState.IDLE ->
+                                        when (voiceState) {
+                                            VoiceState.LISTENING -> "Listening..."
+                                            VoiceState.TRANSCRIBING -> "Processing..."
+                                            VoiceState.THINKING -> "Thinking..."
+                                            VoiceState.SPEAKING -> "Speaking..."
+                                            else -> "Voice Ready"
+                                        }
+                                    modelState == ModelState.UNLOADED -> "Model not loaded"
+                                    modelState == ModelState.LOADING ->
+                                        "Loading model... ${(loadProgress * 100).toInt()}%"
+                                    modelState == ModelState.READY ->
+                                        if (isVoiceMode) "Voice Ready" else "Ready"
+                                    modelState == ModelState.GENERATING -> "Thinking..."
+                                    modelState == ModelState.ERROR -> "Error"
+                                    else -> ""
+                                },
+                                fontSize = 12.sp,
+                                color = when {
+                                    voiceState == VoiceState.LISTENING -> MicRed
+                                    voiceState == VoiceState.SPEAKING -> WaveformPurple
+                                    modelState == ModelState.READY -> Color(0xFF4ADE80)
+                                    modelState == ModelState.ERROR -> Color(0xFFEF4444)
+                                    modelState == ModelState.GENERATING -> NovaAccent
+                                    else -> NovaTextDim
+                                }
+                            )
                         }
-                        Text(
-                            text = when {
-                                isVoiceMode && voiceState != VoiceState.IDLE ->
-                                    when (voiceState) {
-                                        VoiceState.LISTENING -> "Listening..."
-                                        VoiceState.TRANSCRIBING -> "Processing..."
-                                        VoiceState.THINKING -> "Thinking..."
-                                        VoiceState.SPEAKING -> "Speaking..."
-                                        else -> "Voice Ready"
-                                    }
-                                modelState == ModelState.UNLOADED -> "Model not loaded"
-                                modelState == ModelState.LOADING ->
-                                    "Loading model... ${(loadProgress * 100).toInt()}%"
-                                modelState == ModelState.READY ->
-                                    if (isVoiceMode) "Voice Ready" else "Ready"
-                                modelState == ModelState.GENERATING -> "Thinking..."
-                                modelState == ModelState.ERROR -> "Error"
-                                else -> ""
-                            },
-                            fontSize = 12.sp,
-                            color = when {
-                                voiceState == VoiceState.LISTENING -> MicRed
-                                voiceState == VoiceState.SPEAKING -> WaveformPurple
-                                modelState == ModelState.READY -> Color(0xFF4ADE80)
-                                modelState == ModelState.ERROR -> Color(0xFFEF4444)
-                                modelState == ModelState.GENERATING -> NovaAccent
-                                else -> NovaTextDim
-                            }
-                        )
-                    }
-                },
-                actions = {
-                    IconButton(onClick = onNavigateToSettings) {
-                        Icon(
-                            Icons.Default.Settings,
-                            contentDescription = "Settings",
-                            tint = NovaTextDim
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = NovaDark,
-                    titleContentColor = NovaText
-                )
-            )
-        },
-        containerColor = NovaDark
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            // ── Loading / Error State ────────────────────────────
-            AnimatedVisibility(visible = modelState == ModelState.LOADING) {
-                LinearProgressIndicator(
-                    progress = { loadProgress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp),
-                    color = NovaPurple,
-                    trackColor = NovaDarkSurface,
-                )
-            }
-
-            // ── Voice Error Banner ───────────────────────────────
-            AnimatedVisibility(visible = voiceError != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF7F1D1D).copy(alpha = 0.5f))
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    Text(
-                        text = voiceError ?: "",
-                        color = Color(0xFFFCA5A5),
-                        fontSize = 13.sp
+                    },
+                    actions = {
+                        IconButton(onClick = onNavigateToSettings) {
+                            Icon(
+                                Icons.Default.Settings,
+                                contentDescription = "Settings",
+                                tint = NovaTextDim
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = NovaDark,
+                        titleContentColor = NovaText
                     )
-                }
-            }
-
-            // ── Model Load Button (when unloaded) ───────────────
-            AnimatedVisibility(
-                visible = modelState == ModelState.UNLOADED || modelState == ModelState.ERROR
+                )
+            },
+            containerColor = NovaDark
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    if (modelState == ModelState.ERROR && errorMessage != null) {
-                        Text(
-                            text = errorMessage ?: "Unknown error",
-                            color = Color(0xFFEF4444),
-                            fontSize = 13.sp,
-                            modifier = Modifier.padding(bottom = 12.dp)
-                        )
-                    }
-
-                    if (modelFiles.isEmpty()) {
-                        Text(
-                            text = "Copy a .gguf model to Downloads/\nthen tap Load Model",
-                            color = NovaTextDim,
-                            fontSize = 14.sp,
-                            modifier = Modifier.padding(bottom = 12.dp)
-                        )
-                    }
-
-                    Button(
-                        onClick = {
-                            viewModel.scanForModels()
-                            viewModel.loadModel()
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = NovaPurple,
-                            contentColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(12.dp),
+                // ── Loading / Error State ────────────────────────────
+                AnimatedVisibility(visible = modelState == ModelState.LOADING) {
+                    LinearProgressIndicator(
+                        progress = { loadProgress },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(52.dp)
-                    ) {
-                        Text("Load Model", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    }
+                            .height(4.dp),
+                        color = NovaPurple,
+                        trackColor = NovaDarkSurface,
+                    )
+                }
 
-                    // Show found model files
-                    if (modelFiles.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        modelFiles.forEach { file ->
-                            TextButton(
-                                onClick = { viewModel.loadModel(file.absolutePath) }
-                            ) {
-                                Text(
-                                    text = "${file.name} (${file.length() / 1024 / 1024}MB)",
-                                    color = NovaAccent,
-                                    fontSize = 13.sp
-                                )
+                // ── Voice Error Banner ───────────────────────────────
+                AnimatedVisibility(visible = voiceError != null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF7F1D1D).copy(alpha = 0.5f))
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = voiceError ?: "",
+                            color = Color(0xFFFCA5A5),
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+
+                // ── Model Load Button (when unloaded) ───────────────
+                AnimatedVisibility(
+                    visible = modelState == ModelState.UNLOADED || modelState == ModelState.ERROR
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        if (modelState == ModelState.ERROR && errorMessage != null) {
+                            Text(
+                                text = errorMessage ?: "Unknown error",
+                                color = Color(0xFFEF4444),
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(bottom = 12.dp)
+                            )
+                        }
+
+                        if (modelFiles.isEmpty()) {
+                            Text(
+                                text = "Copy a .gguf model to Downloads/\nthen tap Load Model",
+                                color = NovaTextDim,
+                                fontSize = 14.sp,
+                                modifier = Modifier.padding(bottom = 12.dp)
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                viewModel.scanForModels()
+                                viewModel.loadModel()
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NovaPurple,
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                        ) {
+                            Text("Load Model", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        }
+
+                        // Show found model files
+                        if (modelFiles.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            modelFiles.forEach { file ->
+                                TextButton(
+                                    onClick = { viewModel.loadModel(file.absolutePath) }
+                                ) {
+                                    Text(
+                                        text = "${file.name} (${file.length() / 1024 / 1024}MB)",
+                                        color = NovaAccent,
+                                        fontSize = 13.sp
+                                    )
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // ── Chat Messages ────────────────────────────────────
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                items(messages, key = { "${it.id}" }) { msg ->
-                    ChatBubble(
-                        message = msg,
-                        showReplayButton = isVoiceMode && !msg.isUser && !msg.isStreaming,
-                        onReplay = { viewModel.replayMessageAudio(msg) },
-                        isSpeaking = isSpeaking && !msg.isUser // Simplified: shows on all nova msgs when speaking
-                    )
+                // ── Chat Messages ────────────────────────────────────
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 8.dp)
+                ) {
+                    items(messages, key = { "${it.id}" }) { msg ->
+                        ChatBubble(
+                            message = msg,
+                            showReplayButton = isVoiceMode && !msg.isUser && !msg.isStreaming,
+                            onReplay = { viewModel.replayMessageAudio(msg) },
+                            isSpeaking = isSpeaking && !msg.isUser // Simplified: shows on all nova msgs when speaking
+                        )
+                    }
                 }
-            }
 
-            // ── Voice State Indicator ────────────────────────────
-            AnimatedVisibility(
-                visible = isVoiceMode && voiceState != VoiceState.IDLE,
-                enter = fadeIn() + slideInVertically { it },
-                exit = fadeOut() + slideOutVertically { it }
-            ) {
-                VoiceStateIndicator(
-                    voiceState = voiceState,
-                    amplitude = if (voiceState == VoiceState.SPEAKING) speakerAmplitude else micAmplitude,
-                    partialText = partialTranscription
-                )
-            }
-
-            // ── Input Bar ────────────────────────────────────────
-            if (modelState == ModelState.READY || modelState == ModelState.GENERATING) {
-                if (isVoiceMode) {
-                    // ── Voice Input Bar ──────────────────────────
-                    VoiceInputBar(
+                // ── Voice State Indicator ────────────────────────────
+                AnimatedVisibility(
+                    visible = isVoiceMode,
+                    enter = fadeIn() + slideInVertically { it },
+                    exit = fadeOut() + slideOutVertically { it }
+                ) {
+                    VoiceStateIndicator(
                         voiceState = voiceState,
-                        isRecording = isRecording,
-                        micAmplitude = micAmplitude,
-                        onStartRecording = { viewModel.startVoiceRecording() },
-                        onStopRecording = { viewModel.stopVoiceRecording() },
-                        onInterruptSpeech = { viewModel.interruptSpeech() },
-                        enabled = modelState == ModelState.READY ||
-                                voiceState == VoiceState.SPEAKING
-                    )
-                } else {
-                    // ── Text Input Bar ───────────────────────────
-                    TextInputBar(
-                        inputText = inputText,
-                        onInputChange = { inputText = it },
-                        onSend = {
-                            if (inputText.isNotBlank() && modelState == ModelState.READY) {
-                                viewModel.sendMessage(inputText.trim())
-                                inputText = ""
-                                focusManager.clearFocus()
-                            }
-                        },
-                        onCancel = { viewModel.cancelGeneration() },
-                        isGenerating = modelState == ModelState.GENERATING
+                        amplitude = if (voiceState == VoiceState.SPEAKING) speakerAmplitude else micAmplitude,
+                        partialText = partialTranscription
                     )
                 }
+
+                // ── Input Bar ────────────────────────────────────────
+                if (modelState == ModelState.READY || modelState == ModelState.GENERATING) {
+                    if (isVoiceMode) {
+                        // ── Voice Input Bar ──────────────────────────
+                        VoiceInputBar(
+                            voiceState = voiceState,
+                            isRecording = isRecording,
+                            micAmplitude = micAmplitude,
+                            onStartRecording = { viewModel.startVoiceRecording() },
+                            onStopRecording = { viewModel.stopVoiceRecording() },
+                            onInterruptSpeech = { viewModel.interruptSpeech() },
+                            enabled = modelState == ModelState.READY ||
+                                    voiceState == VoiceState.SPEAKING
+                        )
+                    } else {
+                        // ── Text Input Bar ───────────────────────────
+                        TextInputBar(
+                            inputText = inputText,
+                            onInputChange = { inputText = it },
+                            onSend = {
+                                if (inputText.isNotBlank() && modelState == ModelState.READY) {
+                                    viewModel.sendMessage(inputText.trim())
+                                    inputText = ""
+                                    focusManager.clearFocus()
+                                }
+                            },
+                            onCancel = { viewModel.cancelGeneration() },
+                            isGenerating = modelState == ModelState.GENERATING
+                        )
+                    }
+                }
             }
+        }
+
+        // ── EdgeLightEffect overlay ─────────────────────────────────
+        // Rendered on top of the Scaffold content, behind nothing — it's a thin
+        // strip around all 4 screen edges that responds to voice state.
+        // Only visible when voice mode is active, fades in/out gracefully.
+        AnimatedVisibility(
+            visible = isVoiceMode,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.matchParentSize()
+        ) {
+            EdgeLightEffect(
+                voiceState = voiceState,
+                modifier = Modifier.fillMaxSize()
+            )
         }
     }
 }
