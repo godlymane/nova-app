@@ -1,9 +1,12 @@
 package com.nova.companion
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -28,6 +31,7 @@ import androidx.core.content.ContextCompat
 import com.nova.companion.accessibility.AccessibilityPermissionHelper
 import com.nova.companion.brain.context.ContextEngine
 import com.nova.companion.notification.NovaNotificationPrefs
+import com.nova.companion.overlay.AuraOverlayService
 import com.nova.companion.tools.ToolPermissionHelper
 import com.nova.companion.ui.navigation.NovaNavigation
 import com.nova.companion.ui.theme.NovaTheme
@@ -65,6 +69,7 @@ class MainActivity : ComponentActivity() {
         requestToolPermissions()
         requestBrainPermissions()
         checkAccessibilityService()
+        requestOverlayPermission()
 
         WakeWordService.start(this)
 
@@ -79,6 +84,24 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         NovaNotificationPrefs(this).recordAppOpen()
         checkAccessibilityService()
+        // Start overlay if permission granted
+        if (Settings.canDrawOverlays(this)) {
+            AuraOverlayService.start(this)
+        }
+    }
+
+    private fun requestOverlayPermission() {
+        if (!Settings.canDrawOverlays(this)) {
+            Log.i(TAG, "Requesting SYSTEM_ALERT_WINDOW permission")
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
+            startActivity(intent)
+        } else {
+            // Start the overlay service
+            AuraOverlayService.start(this)
+        }
     }
 
     private fun requestMicrophonePermission() {

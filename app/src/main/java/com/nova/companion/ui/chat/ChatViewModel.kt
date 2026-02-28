@@ -19,6 +19,7 @@ import com.nova.companion.data.NovaDatabase
 import com.nova.companion.inference.NovaInference
 import com.nova.companion.inference.NovaInference.ModelState
 import com.nova.companion.memory.MemoryManager
+import com.nova.companion.overlay.AuraOverlayService
 import com.nova.companion.tools.ToolRegistry
 import com.nova.companion.ui.aura.AuraState
 import com.nova.companion.voice.ElevenLabsVoiceService
@@ -203,6 +204,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             WakeWordService.wakeWordEvent.collect {
                 onWakeWordDetected()
+            }
+        }
+
+        // Forward aura state to overlay service
+        viewModelScope.launch {
+            auraState.collect { state ->
+                AuraOverlayService.updateAuraState(state)
             }
         }
     }
@@ -507,11 +515,66 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         router.switchToVoiceMode(appContext)
         viewModelScope.launch {
             try {
-                elevenLabsVoice.connect()
+                val connected = elevenLabsVoice.connect()
+                if (connected) {
+                    // Send conversation context to the new session
+                    sendContextToElevenLabs()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "ElevenLabs connection failed", e)
                 router.setMode(NovaMode.VOICE_LOCAL)
             }
+        }
+    }
+
+    /**
+     * Build and send contextual information to ElevenLabs after connection.
+     * Includes: recent conversation history, memory context, current time/date.
+     */
+    private suspend fun sendContextToElevenLabs() {
+        try {
+            // Get recent messages for conversation continuity
+            val recentMessages = messageDao.getRecentMessages(10).reversed()
+            val historyText = if (recentMessages.isNotEmpty()) {
+                recentMessages.joinToString("\n") { msg ->
+                    val speaker = if (msg.role == "user") "User" else "Nova"
+                    "$speaker: ${msg.content}"
+                }
+            } else ""
+
+            // Get memory context
+            val memoryContext = try {
+                memoryManager.injectContext("")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error building memory context for voice", e)
+                ""
+            }
+
+            // Build the full context string
+            val contextParts = mutableListOf<String>()
+
+            // Current time
+            val now = java.text.SimpleDateFormat("EEEE, MMMM d yyyy 'at' h:mm a", java.util.Locale.getDefault())
+                .format(java.util.Date())
+            contextParts.add("[Current time: $now]")
+
+            // Memory context
+            if (memoryContext.isNotBlank()) {
+                contextParts.add("[Memory context: $memoryContext]")
+            }
+
+            // Recent conversation history
+            if (historyText.isNotBlank()) {
+                contextParts.add("[Recent conversation:\n$historyText]")
+            }
+
+            val fullContext = contextParts.joinToString("\n\n")
+            if (fullContext.isNotBlank()) {
+                elevenLabsVoice.sendContextMessage(fullContext)
+                Log.d(TAG, "Sent context to ElevenLabs (${fullContext.length} chars)")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending context to ElevenLabs", e)
         }
     }
 

@@ -106,17 +106,16 @@ object ToolRegistry {
     }
 
     fun initializeTools(context: Context) {
-        // Existing base tools
-        OpenAppTool.register(this, context)
-        SetAlarmTool.register(this, context)
-        SetReminderTool.register(this, context)
-        SendMessageTool.register(this, context)
-        PhoneSettingsTool.register(this, context)
-        WebSearchTool.register(this, context)
-        NavigateTool.register(this, context)
-        MediaControlTool.register(this, context)
-
-        // Tier 1+ tools via NovaToolRegistry
+        // ALL tools are now in tiers. Old base tools removed to prevent duplicates.
+        // Tier 1 covers: openApp, sendSms, makeCall, setAlarm, setTimer,
+        //   createCalendarEvent, lookupContact, sendWhatsApp, searchWeb, openUrl
+        // Tier 2 covers: toggleWifi, toggleBluetooth, setDnd, setBrightness,
+        //   setVolume, controlMedia, getBatteryInfo, getDeviceInfo,
+        //   readNotifications, toggleFlashlight, takeScreenshot
+        // Tier 3 covers: orderFood, bookRide, playSpotify, playYouTube,
+        //   sendEmail, getWeather, getDirections, shareContent, translateText, quickNote
+        // Tier 4 covers: tapOnScreen, typeText, scrollScreen, pressBack, readScreen,
+        //   sendWhatsAppFull, autoFillForm, navigateApp, waitForElement
         NovaToolRegistry.registerAll(this)
     }
 }

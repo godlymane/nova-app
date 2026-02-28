@@ -38,6 +38,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Base64
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -56,6 +57,7 @@ import kotlin.coroutines.resumeWithException
  * - Transcription updates (user & agent)
  * - Tool call handling and results
  * - Connection state management
+ * - Auto-reconnect on unexpected disconnection
  * - Graceful disconnection and error recovery
  */
 object ElevenLabsVoiceService {
@@ -77,6 +79,10 @@ object ElevenLabsVoiceService {
     // Connection timing
     private const val HANDSHAKE_TIMEOUT_MS = 5000L
     private const val PING_INTERVAL_MS = 20000L
+
+    // Reconnect configuration
+    private const val MAX_RECONNECT_ATTEMPTS = 3
+    private const val RECONNECT_DELAY_MS = 2000L
 
     // ── Connection state machine ───────────────────────────────────────
     enum class ConnectionState {
@@ -135,8 +141,14 @@ object ElevenLabsVoiceService {
     private var recordingJob: Job? = null
     private var playbackJob: Job? = null
     private var pingJob: Job? = null
+    private var reconnectJob: Job? = null
     private var handshakeCompleted = false
+    private var reconnectAttempts = 0
     private val gson = Gson()
+
+    // Audio playback queue
+    private val audioQueue = ConcurrentLinkedQueue<ByteArray>()
+    private var isPlaybackRunning = false
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -211,6 +223,7 @@ object ElevenLabsVoiceService {
 
             if (handshakeSuccess) {
                 _connectionState.value = ConnectionState.CONNECTED
+                reconnectAttempts = 0
                 emitStatusChange("Connected to ElevenLabs Conversational AI")
 
                 // Start microphone recording
@@ -241,9 +254,14 @@ object ElevenLabsVoiceService {
     fun disconnect() {
         Log.i(TAG, "Disconnecting from ElevenLabs Conversational AI")
 
+        reconnectJob?.cancel()
+        reconnectAttempts = 0
         recordingJob?.cancel()
         playbackJob?.cancel()
         pingJob?.cancel()
+
+        audioQueue.clear()
+        isPlaybackRunning = false
 
         stopAudioRecord()
         stopAudioTrack()
@@ -282,6 +300,27 @@ object ElevenLabsVoiceService {
      */
     fun setOnStatusChange(callback: (String) -> Unit) {
         onStatusChange = callback
+    }
+
+    /**
+     * Send contextual information to the ElevenLabs agent after connection.
+     * This injects memory, time, and conversation history into the current session.
+     * Sent as a text message the agent processes silently for conversation continuity.
+     */
+    fun sendContextMessage(context: String) {
+        if (_connectionState.value != ConnectionState.CONNECTED || context.isBlank()) {
+            Log.w(TAG, "Cannot send context: not connected or empty context")
+            return
+        }
+
+        val contextPrompt = "[SYSTEM CONTEXT - Do not read this aloud, just absorb it silently for conversation continuity]\n$context"
+
+        val message = JsonObject().apply {
+            addProperty("type", "user_message")
+            addProperty("text", contextPrompt)
+        }
+        webSocket?.send(message.toString())
+        Log.i(TAG, "Context injected (${context.length} chars)")
     }
 
     /**
@@ -329,6 +368,7 @@ object ElevenLabsVoiceService {
      * Clean up all resources.
      */
     fun release() {
+        reconnectJob?.cancel()
         disconnect()
         coroutineScope.cancel()
         httpClient.dispatcher.executorService.shutdown()
@@ -488,20 +528,51 @@ object ElevenLabsVoiceService {
         }
     }
 
-    private fun startPlaybackAudio(base64Audio: String) {
+    /**
+     * Queue audio chunk for playback. Chunks are played sequentially.
+     */
+    private fun queueAudioPlayback(base64Audio: String) {
+        try {
+            val audioBytes = Base64.getDecoder().decode(base64Audio)
+            audioQueue.add(audioBytes)
+
+            // Start the playback loop if not already running
+            if (!isPlaybackRunning) {
+                startPlaybackLoop()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error queuing audio", e)
+        }
+    }
+
+    private fun startPlaybackLoop() {
         if (playbackJob?.isActive == true) return
+        isPlaybackRunning = true
 
         playbackJob = coroutineScope.launch {
             try {
-                val audioBytes = Base64.getDecoder().decode(base64Audio)
-                audioTrack?.write(audioBytes, 0, audioBytes.size, AudioTrack.WRITE_BLOCKING)
                 audioTrack?.play()
-
                 _isAgentSpeaking.value = true
-                Log.d(TAG, "Playback started: ${audioBytes.size} bytes")
+
+                while (_connectionState.value == ConnectionState.CONNECTED || audioQueue.isNotEmpty()) {
+                    val chunk = audioQueue.poll()
+                    if (chunk != null) {
+                        audioTrack?.write(chunk, 0, chunk.size, AudioTrack.WRITE_BLOCKING)
+                    } else {
+                        // No data in queue — wait briefly before checking again
+                        delay(10)
+                        // If queue is still empty after a brief wait, agent stopped speaking
+                        if (audioQueue.isEmpty()) {
+                            break
+                        }
+                    }
+                }
             } catch (e: Exception) {
-                Log.e(TAG, "Playback error", e)
-                emitError("Playback error: ${e.message}")
+                Log.e(TAG, "Playback loop error", e)
+            } finally {
+                _isAgentSpeaking.value = false
+                isPlaybackRunning = false
+                Log.d(TAG, "Playback loop ended")
             }
         }
     }
@@ -523,6 +594,45 @@ object ElevenLabsVoiceService {
             }
         }
     }
+
+    // ── Reconnect logic ──────────────────────────────────────────────
+
+    private fun scheduleReconnect() {
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            Log.w(TAG, "Max reconnect attempts reached, giving up")
+            _connectionState.value = ConnectionState.ERROR
+            emitError("Connection lost. Say 'Hey Nova' to reconnect.")
+            reconnectAttempts = 0
+            return
+        }
+
+        reconnectJob?.cancel()
+        reconnectJob = coroutineScope.launch {
+            reconnectAttempts++
+            Log.i(TAG, "Reconnect attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS in ${RECONNECT_DELAY_MS}ms")
+            delay(RECONNECT_DELAY_MS)
+
+            // Clean up old connection
+            recordingJob?.cancel()
+            playbackJob?.cancel()
+            pingJob?.cancel()
+            audioQueue.clear()
+            isPlaybackRunning = false
+            stopAudioRecord()
+            stopAudioTrack()
+            webSocket = null
+            handshakeCompleted = false
+
+            // Reconnect
+            val success = connect()
+            if (success) {
+                reconnectAttempts = 0
+                Log.i(TAG, "Reconnected successfully")
+            }
+        }
+    }
+
+    // ── Event emitters ────────────────────────────────────────────────
 
     private fun emitAgentMessage(text: String) {
         onAgentMessage(text)
@@ -594,7 +704,13 @@ object ElevenLabsVoiceService {
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             Log.i(TAG, "WebSocket closing: code=$code reason=$reason")
-            _connectionState.value = ConnectionState.DISCONNECTED
+            // If server closed unexpectedly, try reconnect
+            if (code != 1000) {
+                _connectionState.value = ConnectionState.ERROR
+                scheduleReconnect()
+            } else {
+                _connectionState.value = ConnectionState.DISCONNECTED
+            }
             emitStatusChange("Connection closed: $reason")
         }
 
@@ -607,7 +723,8 @@ object ElevenLabsVoiceService {
             Log.e(TAG, "WebSocket failure", t)
             _connectionState.value = ConnectionState.ERROR
             emitError("WebSocket error: ${t.message}")
-            disconnect()
+            // Don't call disconnect() immediately — try to reconnect
+            scheduleReconnect()
         }
     }
 
@@ -618,8 +735,8 @@ object ElevenLabsVoiceService {
             val eventId = audioEvent.get("event_id")?.asString
 
             if (base64Audio.isNotBlank()) {
-                startPlaybackAudio(base64Audio)
-                Log.d(TAG, "Audio message received: event_id=$eventId")
+                queueAudioPlayback(base64Audio)
+                Log.d(TAG, "Audio chunk queued: event_id=$eventId")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error handling audio message", e)
