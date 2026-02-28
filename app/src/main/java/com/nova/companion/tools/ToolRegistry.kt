@@ -14,7 +14,7 @@ data class NovaTool(
 )
 
 data class ToolParam(
-    val type: String,  // "string", "number", "boolean"
+    val type: String,
     val description: String,
     val required: Boolean = true
 )
@@ -106,6 +106,7 @@ object ToolRegistry {
     }
 
     fun initializeTools(context: Context) {
+        // Existing base tools
         OpenAppTool.register(this, context)
         SetAlarmTool.register(this, context)
         SetReminderTool.register(this, context)
@@ -114,5 +115,8 @@ object ToolRegistry {
         WebSearchTool.register(this, context)
         NavigateTool.register(this, context)
         MediaControlTool.register(this, context)
+
+        // Tier 1+ tools via NovaToolRegistry
+        NovaToolRegistry.registerAll(this)
     }
 }

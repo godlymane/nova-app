@@ -4,7 +4,6 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
-// Read API keys from local.properties
 fun getLocalProperty(key: String, defaultValue: String = ""): String {
     val propsFile = rootProject.file("local.properties")
     if (!propsFile.exists()) return defaultValue
@@ -33,7 +32,6 @@ android {
             useSupportLibrary = true
         }
 
-        // Inject API keys from local.properties into BuildConfig
         buildConfigField("String", "ELEVENLABS_API_KEY", "\"${getLocalProperty("ELEVENLABS_API_KEY")}\"")
         buildConfigField("String", "ELEVENLABS_VOICE_ID", "\"${getLocalProperty("ELEVENLABS_VOICE_ID")}\"")
         buildConfigField("String", "ELEVENLABS_AGENT_ID", "\"${getLocalProperty("ELEVENLABS_AGENT_ID", "agent_1001kjg9ge5cem")}\"")
@@ -43,7 +41,6 @@ android {
         buildConfigField("String", "PICOVOICE_ACCESS_KEY", "\"${getLocalProperty("PICOVOICE_ACCESS_KEY")}\"")
 
         ndk {
-            // Target arm64 for on-device inference; add x86_64 for emulator testing
             abiFilters += listOf("arm64-v8a")
         }
 
@@ -69,7 +66,6 @@ android {
         }
         debug {
             isDebuggable = true
-            // Use lower optimization for faster debug builds
             externalNativeBuild {
                 cmake {
                     cppFlags += listOf("-std=c++17", "-O0", "-g")
@@ -153,6 +149,9 @@ dependencies {
 
     // Picovoice Porcupine — wake word detection
     implementation("ai.picovoice:porcupine-android:3.0.2")
+
+    // ElevenLabs Android SDK — Conversational AI with client tools
+    implementation("io.elevenlabs:elevenlabs-android:0.7.2")
 
     // Debug
     debugImplementation("androidx.compose.ui:ui-tooling")
