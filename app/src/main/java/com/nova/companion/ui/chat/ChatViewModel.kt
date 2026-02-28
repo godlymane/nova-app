@@ -2,6 +2,10 @@ package com.nova.companion.ui.chat
 
 import android.app.Application
 import android.content.Context
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -16,10 +20,19 @@ import com.nova.companion.inference.NovaInference
 import com.nova.companion.inference.NovaInference.ModelState
 import com.nova.companion.memory.MemoryManager
 import com.nova.companion.tools.ToolRegistry
+import com.nova.companion.ui.aura.AuraState
 import com.nova.companion.voice.ElevenLabsVoiceService
+import com.nova.companion.voice.WakeWordService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -53,7 +66,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // ── Memory System ──────────────────────────────────────────
     val memoryManager = MemoryManager(database)
 
-    // ── Router ─────────────────────────────────────────────────
+    // ── Router ────────────────────────────────────────────────
     val router = NovaRouter
 
     // ── Tool Registry ──────────────────────────────────────────
@@ -94,6 +107,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val elevenLabsAgentText = elevenLabsVoice.agentTranscription
     val elevenLabsUserText = elevenLabsVoice.userTranscription
     val isElevenLabsSpeaking = elevenLabsVoice.isAgentSpeaking
+
+    // ── Wake word state ───────────────────────────────────────
+    private val _wakeWordTriggered = MutableStateFlow(false)
+    val wakeWordTriggered: StateFlow<Boolean> = _wakeWordTriggered.asStateFlow()
+
+    // ── Aura state ──────────────────────────────────────────
+    // Derived from: wake word → SURGE, generating/voice-active → ACTIVE, idle → DORMANT
+    val auraState: StateFlow<AuraState> = combine(
+        _wakeWordTriggered,
+        _isGenerating,
+        router.isVoiceActive
+    ) { wakeWord, generating, voiceActive ->
+        when {
+            wakeWord -> AuraState.SURGE
+            generating || voiceActive -> AuraState.ACTIVE
+            else -> AuraState.DORMANT
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = AuraState.DORMANT
+    )
 
     private var generationJob: Job? = null
 
@@ -163,7 +198,69 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+
+        // Listen for wake word events from WakeWordService
+        viewModelScope.launch {
+            WakeWordService.wakeWordEvent.collect {
+                onWakeWordDetected()
+            }
+        }
     }
+
+    /**
+     * Called by WakeWordService (or wherever wake word detection is integrated)
+     * when the wake word is detected. Triggers:
+     *  1. Aura SURGE for 2 seconds.
+     *  2. Medium haptic buzz (100 ms).
+     *  3. Automatic ElevenLabs voice session start.
+     */
+    fun onWakeWordDetected() {
+        // Haptic feedback
+        triggerWakeWordVibration()
+
+        viewModelScope.launch {
+            _wakeWordTriggered.value = true
+
+            // Start ElevenLabs voice on wake word
+            if (CloudConfig.isOnline(appContext) && CloudConfig.hasElevenLabsKey()) {
+                startElevenLabsVoice()
+            } else {
+                router.switchToVoiceMode(appContext)
+            }
+
+            // Hold SURGE for 2 seconds, then clear the wake word flag
+            delay(2_000)
+            _wakeWordTriggered.value = false
+        }
+    }
+
+    private fun triggerWakeWordVibration() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager =
+                    appContext.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                val vibrator = vibratorManager.defaultVibrator
+                vibrator.vibrate(
+                    VibrationEffect.createOneShot(100L, VibrationEffect.DEFAULT_AMPLITUDE)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                val vibrator = appContext.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(
+                        VibrationEffect.createOneShot(100L, VibrationEffect.DEFAULT_AMPLITUDE)
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(100L)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Vibration failed", e)
+        }
+    }
+
+    // ── Settings ────────────────────────────────────────────
 
     private fun loadSettings() {
         _settings.update {
@@ -231,9 +328,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun sendLocalMessage(text: String) {
         if (NovaInference.state.value != ModelState.READY) {
+            // Online + key available → fall back to cloud silently
             if (CloudConfig.isOnline(appContext) && CloudConfig.hasOpenAiKey()) {
                 sendCloudMessage(text)
                 return
+            }
+            // Offline and no local model — surface a user-visible error
+            viewModelScope.launch {
+                messageDao.insertMessage(MessageEntity(role = "user", content = text))
+                messageDao.insertMessage(
+                    MessageEntity(
+                        role = "assistant",
+                        content = "Hey, I can't reach the cloud and no local model is loaded. " +
+                                "Check your internet or load a model in Settings."
+                    )
+                )
             }
             return
         }
@@ -277,7 +386,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 onError = { error ->
                     viewModelScope.launch {
                         messageDao.insertMessage(
-                            MessageEntity(role = "assistant", content = "Yo something broke: ${error.message}")
+                            MessageEntity(
+                                role = "assistant",
+                                content = "Yo something broke: ${error.message}"
+                            )
                         )
                     }
                     _streamingText.value = ""
@@ -335,7 +447,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         if (tool != null) {
                             tool.executor(appContext, params)
                         } else {
-                            com.nova.companion.tools.ToolResult(false, "Unknown tool: $toolName")
+                            com.nova.companion.tools.ToolResult(
+                                false,
+                                "Unknown tool: $toolName"
+                            )
                         }
                     },
                     onResponse = { response ->
@@ -350,7 +465,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     onError = { error ->
                         viewModelScope.launch {
                             messageDao.insertMessage(
-                                MessageEntity(role = "assistant", content = "Automation failed bro: $error")
+                                MessageEntity(
+                                    role = "assistant",
+                                    content = "Automation failed bro: $error"
+                                )
                             )
                             _streamingText.value = ""
                             _isGenerating.value = false
@@ -360,7 +478,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 Log.e(TAG, "Automation error", e)
                 messageDao.insertMessage(
-                    MessageEntity(role = "assistant", content = "Couldn't run that automation: ${e.message}")
+                    MessageEntity(
+                        role = "assistant",
+                        content = "Couldn't run that automation: ${e.message}"
+                    )
                 )
                 _streamingText.value = ""
                 _isGenerating.value = false
@@ -401,7 +522,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         router.switchToTextMode()
     }
 
-    // ── Existing controls ──────────────────────────────────────
+    // ── Conversation helpers ─────────────────────────────────
 
     private suspend fun buildConversationHistory(): String {
         val recent = messageDao.getRecentMessages(6).reversed()
@@ -411,12 +532,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ── Generation controls ──────────────────────────────────
+
     fun cancelGeneration() {
         NovaInference.cancelGeneration()
         generationJob?.cancel()
         _isGenerating.value = false
         _streamingText.value = ""
     }
+
+    // ── Settings controls ────────────────────────────────────
 
     fun updateTemperature(value: Float) {
         _settings.update { it.copy(temperature = value) }
@@ -437,6 +562,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun unloadModel() {
         NovaInference.unloadModel()
     }
+
+    // ── Lifecycle ────────────────────────────────────────────
 
     override fun onCleared() {
         super.onCleared()
