@@ -19,6 +19,9 @@ object ToolPermissionHelper {
         Manifest.permission.READ_CONTACTS
     )
 
+    // Tier 3 tools use intents and deep links — no additional runtime permissions needed.
+    // INTERNET is a normal permission (declared in manifest, auto-granted).
+
     fun getMissingPermissions(context: Context): List<String> {
         return TIER1_PERMISSIONS.filter { permission ->
             ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED
