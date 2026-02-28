@@ -12,6 +12,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.unit.dp
+import com.nova.companion.ui.theme.NovaPurpleCore
+import com.nova.companion.ui.theme.NovaPurpleDeep
+import com.nova.companion.ui.theme.NovaPurpleElectric
+import com.nova.companion.ui.theme.NovaPurpleGlow
+import com.nova.companion.ui.theme.NovaPurpleMagenta
+import com.nova.companion.ui.theme.NovaRed
+import com.nova.companion.ui.theme.NovaOrange
 import com.nova.companion.voice.VoiceManager.VoiceState
 import kotlin.math.abs
 import kotlin.math.sin
@@ -23,11 +30,11 @@ import kotlin.math.sin
  * Each strip is a thin gradient bar (~4dp) running the full length of its edge.
  * The color and animation pattern changes with each VoiceState:
  *
- *   IDLE         — subtle slow-breathing purple/blue glow
+ *   IDLE         — subtle slow-breathing purple aura (NovaPurpleCore / NovaPurpleDeep)
  *   LISTENING    — red pulse that beats with mic input
  *   TRANSCRIBING — amber/orange sweep travelling along edges
- *   THINKING     — flowing purple wave
- *   SPEAKING     — purple/green flowing shimmer
+ *   THINKING     — flowing purple wave (NovaPurpleGlow / NovaPurpleCore)
+ *   SPEAKING     — magenta/electric purple flowing shimmer
  *   ERROR        — rapid red flash
  *
  * Usage: Wrap your screen content in a Box and add EdgeLightEffect as an overlay:
@@ -75,7 +82,7 @@ fun EdgeLightEffect(
         label = "edgePhase"
     )
 
-    // ── Intensity / alpha animation ──────────────────────────────────
+    // ── Intensity / alpha animation ──────────────────────────────
     val intensity by infiniteTransition.animateFloat(
         initialValue = 0.3f,
         targetValue = 1.0f,
@@ -96,23 +103,23 @@ fun EdgeLightEffect(
         label = "edgeIntensity"
     )
 
-    // ── Color palette per state ──────────────────────────────────────
+    // ── Color palette per state (purple aura theme) ────────────────
     val primaryColor = when (voiceState) {
-        VoiceState.IDLE -> Color(0xFF6C3AED)            // NovaPurple
-        VoiceState.LISTENING -> Color(0xFFEF4444)        // MicRed
-        VoiceState.TRANSCRIBING -> Color(0xFFF59E0B)     // Amber
-        VoiceState.THINKING -> Color(0xFF8B5CF6)         // WaveformPurple
-        VoiceState.SPEAKING -> Color(0xFF8B5CF6)         // WaveformPurple
-        VoiceState.ERROR -> Color(0xFFEF4444)            // MicRed
+        VoiceState.IDLE         -> NovaPurpleCore          // deep vivid purple
+        VoiceState.LISTENING    -> NovaRed                 // mic-active red
+        VoiceState.TRANSCRIBING -> NovaOrange              // amber/orange processing
+        VoiceState.THINKING     -> NovaPurpleGlow          // glowing lighter purple
+        VoiceState.SPEAKING     -> NovaPurpleMagenta       // magenta-purple output
+        VoiceState.ERROR        -> NovaRed                 // error red
     }
 
     val secondaryColor = when (voiceState) {
-        VoiceState.IDLE -> Color(0xFF3B82F6)             // Blue
-        VoiceState.LISTENING -> Color(0xFF7F1D1D)        // MicRedDim
-        VoiceState.TRANSCRIBING -> Color(0xFFEF4444)     // Red-orange
-        VoiceState.THINKING -> Color(0xFF6C3AED)         // NovaPurple deeper
-        VoiceState.SPEAKING -> Color(0xFF34D399)         // Emerald green
-        VoiceState.ERROR -> Color(0xFF7F1D1D)            // Dark red
+        VoiceState.IDLE         -> NovaPurpleDeep          // deep dark purple
+        VoiceState.LISTENING    -> Color(0xFF7F1D1D)       // dark dim red (unchanged)
+        VoiceState.TRANSCRIBING -> NovaRed                 // red-orange (unchanged)
+        VoiceState.THINKING     -> NovaPurpleCore          // core purple depth layer
+        VoiceState.SPEAKING     -> NovaPurpleElectric      // electric violet shimmer
+        VoiceState.ERROR        -> Color(0xFF7F1D1D)       // dark dim red (unchanged)
     }
 
     // Strip thickness in Dp converted inside Canvas
@@ -153,7 +160,7 @@ fun EdgeLightEffect(
             }
         }
 
-        // ── TOP STRIP ────────────────────────────────────────────────
+        // ── TOP STRIP ────────────────────────────────────────────
         // Gradient runs left → right
         val topAlphaLeft = getStripAlpha(0.0f)
         val topAlphaMid = getStripAlpha(0.5f)
@@ -176,7 +183,7 @@ fun EdgeLightEffect(
             size = Size(w, stripPx)
         )
 
-        // ── BOTTOM STRIP ─────────────────────────────────────────────
+        // ── BOTTOM STRIP ──────────────────────────────────────────
         // Mirror of top, using inverted phase for visual interest
         val bottomPhase = (phase + 0.5f) % 1f
         fun bottomAlpha(pos: Float): Float {
@@ -216,7 +223,7 @@ fun EdgeLightEffect(
             size = Size(w, stripPx)
         )
 
-        // ── LEFT STRIP ───────────────────────────────────────────────
+        // ── LEFT STRIP ───────────────────────────────────────────
         // Gradient runs top → bottom, with vertical phase offset
         val leftPhase = (phase + 0.25f) % 1f
         fun leftAlpha(pos: Float): Float {
@@ -256,7 +263,7 @@ fun EdgeLightEffect(
             size = Size(stripPx, h)
         )
 
-        // ── RIGHT STRIP ──────────────────────────────────────────────
+        // ── RIGHT STRIP ──────────────────────────────────────────
         val rightPhase = (phase + 0.75f) % 1f
         fun rightAlpha(pos: Float): Float {
             return when (voiceState) {
