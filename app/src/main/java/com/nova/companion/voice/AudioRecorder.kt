@@ -23,37 +23,38 @@ import kotlin.math.sqrt
  * Includes Voice Activity Detection (VAD) to auto-stop after silence.
  * Emits amplitude levels for UI visualization.
  *
- * Changes from original:
- * - Audio source changed to VOICE_RECOGNITION (better noise handling than MIC)
- * - NoiseSuppressor and AcousticEchoCanceler attached after init (when available)
- * - Adaptive VAD: samples ambient noise for first 500ms, sets threshold to 2× ambient RMS
- * - Gain normalization: running gain factor normalizes audio to ~0.7 of peak
+ * Audio pipeline:
+ * - Source: VOICE_RECOGNITION (device-optimized for far-field speech)
+ * - NoiseSuppressor and AcousticEchoCanceler attached when available
+ * - Adaptive VAD: samples ambient noise for first 500ms, threshold = 2.5× ambient RMS
+ * - Gain normalization: running gain factor targets ~0.7 peak amplitude
+ * - Min speech duration: 800ms before VAD can trigger auto-stop
  */
 class AudioRecorder {
 
     companion object {
         private const val TAG = "AudioRecorder"
-        const val SAMPLE_RATE = 16000 // Whisper expects 16kHz
+        const val SAMPLE_RATE = 16000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
 
-        // VAD configuration — used as fallback minimum when adaptive threshold is unavailable
-        private const val VAD_SILENCE_THRESHOLD_MIN = 300f  // Absolute floor RMS below which = silence
-        private const val VAD_SILENCE_DURATION_MS = 3000L   // Stop after 3s of silence
-        private const val VAD_MIN_SPEECH_MS = 500L           // Min speech before VAD can trigger
+        // VAD configuration
+        private const val VAD_SILENCE_THRESHOLD_MIN = 300f
+        private const val VAD_SILENCE_DURATION_MS = 3000L
+        private const val VAD_MIN_SPEECH_MS = 800L
 
         // Ambient sampling window (adaptive VAD)
-        private const val AMBIENT_SAMPLE_DURATION_MS = 500L  // First 500ms used to measure ambient noise
-        private const val AMBIENT_THRESHOLD_MULTIPLIER = 2f  // VAD threshold = 2× ambient RMS
+        private const val AMBIENT_SAMPLE_DURATION_MS = 500L
+        private const val AMBIENT_THRESHOLD_MULTIPLIER = 2.5f
 
         // Max recording duration (safety limit)
-        private const val MAX_RECORDING_MS = 30000L // 30 seconds max
+        private const val MAX_RECORDING_MS = 30000L
 
         // Gain normalization
-        private const val GAIN_TARGET = 0.7f           // Target normalized peak amplitude
-        private const val GAIN_SMOOTH_FACTOR = 0.05f   // How quickly running gain adjusts (0 = instant, 1 = frozen)
-        private const val GAIN_MIN = 0.1f              // Clamp gain to prevent extreme amplification on silence
-        private const val GAIN_MAX = 10f               // Clamp gain to prevent clipping on quiet signal
+        private const val GAIN_TARGET = 0.7f
+        private const val GAIN_SMOOTH_FACTOR = 0.05f
+        private const val GAIN_MIN = 0.1f
+        private const val GAIN_MAX = 10f
     }
 
     private var audioRecord: AudioRecord? = null
@@ -62,25 +63,20 @@ class AudioRecorder {
     private var recordingJob: Job? = null
     private var recordingScope: CoroutineScope? = null
 
-    // Accumulated audio samples (normalized float -1.0 to 1.0, gain-adjusted)
     private val audioSamples = mutableListOf<Float>()
 
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
 
-    // Emits current amplitude level (0.0 - 1.0) for mic animation
     private val _amplitudeLevel = MutableStateFlow(0f)
     val amplitudeLevel: StateFlow<Float> = _amplitudeLevel.asStateFlow()
 
-    // Emits when recording completes (with audio data)
     private val _recordingComplete = MutableSharedFlow<FloatArray>()
     val recordingComplete: SharedFlow<FloatArray> = _recordingComplete.asSharedFlow()
 
-    // Emits when VAD triggers auto-stop
     private val _vadTriggered = MutableSharedFlow<Unit>()
     val vadTriggered: SharedFlow<Unit> = _vadTriggered.asSharedFlow()
 
-    // Running gain factor for normalization (starts at 1.0, adapts over time)
     @Volatile private var runningGain = 1f
 
     /**
@@ -103,14 +99,12 @@ class AudioRecorder {
         }
 
         try {
-            // VOICE_RECOGNITION: tuned for speech capture — uses device's pre-processing
-            // for far-field speech, provides better frequency response than raw MIC source.
             audioRecord = AudioRecord(
                 MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
-                bufferSize * 2 // Double buffer for safety
+                bufferSize * 2
             )
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
@@ -195,19 +189,17 @@ class AudioRecorder {
     }
 
     /**
-     * Main recording loop. Reads from AudioRecord, accumulates gain-normalized samples,
-     * computes amplitude for UI, and runs adaptive VAD.
+     * Main recording loop with adaptive VAD and gain normalization.
      *
-     * Phase 1 (first AMBIENT_SAMPLE_DURATION_MS): Sample ambient noise to set VAD threshold.
-     * Phase 2 (after ambient phase): Normal VAD + gain normalization in effect.
+     * Phase 1 (first 500ms): Sample ambient noise to calibrate VAD threshold.
+     * Phase 2 (after ambient phase): Normal VAD + gain normalization.
      */
     private suspend fun recordLoop(bufferSize: Int) {
-        val buffer = ShortArray(bufferSize / 2) // 16-bit = 2 bytes per sample
+        val buffer = ShortArray(bufferSize / 2)
         var silenceStartMs = 0L
         var hasSpeechStarted = false
         val recordingStartMs = System.currentTimeMillis()
 
-        // Adaptive VAD: accumulated ambient RMS samples during first AMBIENT_SAMPLE_DURATION_MS
         val ambientRmsSamples = mutableListOf<Float>()
         var ambientPhaseComplete = false
         var adaptiveVadThreshold = VAD_SILENCE_THRESHOLD_MIN
@@ -222,57 +214,49 @@ class AudioRecorder {
 
             val elapsedMs = System.currentTimeMillis() - recordingStartMs
 
-            // ── Compute raw RMS ──────────────────────────────────────
             val rms = computeRMS(buffer, readCount)
 
-            // ── Adaptive VAD threshold (ambient phase) ───────────────
+            // Adaptive VAD threshold calibration
             if (!ambientPhaseComplete) {
                 if (elapsedMs < AMBIENT_SAMPLE_DURATION_MS) {
                     ambientRmsSamples.add(rms)
                 } else {
-                    // Ambient phase done — compute threshold
                     ambientPhaseComplete = true
                     if (ambientRmsSamples.isNotEmpty()) {
                         val ambientMean = ambientRmsSamples.average().toFloat()
                         val candidateThreshold = ambientMean * AMBIENT_THRESHOLD_MULTIPLIER
-                        // Threshold is max(candidate, minimum floor) to avoid zeroing out
                         adaptiveVadThreshold = maxOf(candidateThreshold, VAD_SILENCE_THRESHOLD_MIN)
                         Log.i(TAG, "Adaptive VAD threshold set: $adaptiveVadThreshold " +
-                                "(ambient RMS mean=${ambientMean}, multiplier=$AMBIENT_THRESHOLD_MULTIPLIER)")
+                                "(ambient RMS mean=$ambientMean, multiplier=$AMBIENT_THRESHOLD_MULTIPLIER)")
                     }
                 }
             }
 
-            // ── Gain normalization ────────────────────────────────────
-            // Compute peak amplitude of this chunk (0–32767 for 16-bit)
+            // Gain normalization
             var peakAmplitude = 0f
             for (i in 0 until readCount) {
                 val v = abs(buffer[i].toFloat())
                 if (v > peakAmplitude) peakAmplitude = v
             }
 
-            // Target peak = GAIN_TARGET * Short.MAX_VALUE
             val targetPeak = GAIN_TARGET * Short.MAX_VALUE
             val desiredGain = if (peakAmplitude > 0f) (targetPeak / peakAmplitude) else 1f
 
-            // Smooth gain adjustment to avoid sudden jumps
             runningGain = runningGain + GAIN_SMOOTH_FACTOR * (desiredGain - runningGain)
             runningGain = runningGain.coerceIn(GAIN_MIN, GAIN_MAX)
 
-            // ── Convert to float and apply gain ──────────────────────
             val floatChunk = FloatArray(readCount) { i ->
                 val sample = buffer[i].toFloat() / Short.MAX_VALUE
-                (sample * runningGain).coerceIn(-1f, 1f) // clamp after gain to avoid float overflow
+                (sample * runningGain).coerceIn(-1f, 1f)
             }
             synchronized(audioSamples) {
                 audioSamples.addAll(floatChunk.toList())
             }
 
-            // ── UI amplitude (normalized 0–1, using raw RMS before gain) ──
             val normalizedAmplitude = (rms / 8000f).coerceIn(0f, 1f)
             _amplitudeLevel.value = normalizedAmplitude
 
-            // ── Voice Activity Detection ──────────────────────────────
+            // Voice Activity Detection
             if (rms > adaptiveVadThreshold) {
                 hasSpeechStarted = true
                 silenceStartMs = 0L
@@ -319,9 +303,6 @@ class AudioRecorder {
         }
     }
 
-    /**
-     * Compute Root Mean Square amplitude of PCM samples.
-     */
     private fun computeRMS(buffer: ShortArray, count: Int): Float {
         var sum = 0.0
         for (i in 0 until count) {
@@ -331,9 +312,6 @@ class AudioRecorder {
         return sqrt(sum / count).toFloat()
     }
 
-    /**
-     * Release NoiseSuppressor and AcousticEchoCanceler if attached.
-     */
     private fun releaseAudioEffects() {
         try {
             noiseSuppressor?.release()
@@ -349,14 +327,8 @@ class AudioRecorder {
         }
     }
 
-    /**
-     * Check if currently recording.
-     */
     fun isCurrentlyRecording(): Boolean = _isRecording.value
 
-    /**
-     * Release all resources.
-     */
     fun release() {
         stopRecording()
         releaseAudioEffects()
