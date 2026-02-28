@@ -153,6 +153,9 @@ dependencies {
     // ElevenLabs Android SDK — Conversational AI with client tools
     implementation("io.elevenlabs:elevenlabs-android:0.7.2")
 
+    // Google Play Services - Location (for Nova Brain context collection)
+    implementation("com.google.android.gms:play-services-location:21.1.0")
+
     // Debug
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
