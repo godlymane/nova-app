@@ -46,7 +46,6 @@ object ToolPermissionHelper {
 
     /**
      * Request a list of permissions from an Activity.
-     * Use this in your Activity/Fragment to trigger the system permission dialog.
      */
     fun requestPermissions(activity: Activity, permissions: Array<String>, requestCode: Int) {
         ActivityCompat.requestPermissions(activity, permissions, requestCode)
@@ -54,7 +53,9 @@ object ToolPermissionHelper {
 
     /**
      * Returns the list of runtime permissions that Nova tools require.
-     * Call this during onboarding or first launch.
+     * Tier 1: SMS, calls, contacts
+     * Tier 2: Bluetooth
+     * Tier 4: No runtime permissions — AccessibilityService is enabled in Settings
      */
     fun requiredPermissions(): Array<String> {
         val permissions = mutableListOf(

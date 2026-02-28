@@ -78,6 +78,10 @@
     <!-- Wake lock -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- ========== TIER 4 PERMISSIONS ========== -->
+    <!-- Note: No runtime permissions needed for AccessibilityService -->
+    <!-- The user enables it manually in Settings > Accessibility -->
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
@@ -120,6 +124,22 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Nova context collection for personalized assistance" />
+        </service>
+
+        <!-- ========== TIER 4 SERVICES ========== -->
+
+        <!-- AccessibilityService for UI automation -->
+        <service
+            android:name=".accessibility.NovaAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:label="Nova Companion"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/nova_accessibility_config" />
         </service>
 
     </application>
