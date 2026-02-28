@@ -23,35 +23,40 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 
 /**
- * WakeWordService — persistent foreground service that listens for the "Nova" wake word
- * using Picovoice Porcupine.
+ * WakeWordService — persistent foreground service that listens for the "Hey Nova" wake word
+ * using Picovoice Porcupine with a custom-trained .ppn keyword file.
  *
- * When the wake word is detected, it broadcasts [ACTION_WAKE_WORD_DETECTED] and
- * signals the singleton [VoiceManager] to begin listening via [VoiceManager.startListening].
+ * When the wake word is detected, it:
+ *   1. Requests audio focus
+ *   2. Vibrates the device (100 ms, medium amplitude)
+ *   3. Broadcasts [ACTION_WAKE_WORD_DETECTED] so any registered BroadcastReceivers can act
+ *   4. Emits a Unit on [wakeWordEvent] SharedFlow so ChatViewModel can observe without overhead
+ *   5. Calls [VoiceManager.startListening] in-process via [ActiveVoiceManagerHolder]
  *
- * NOTE: Currently uses the built-in "PORCUPINE" keyword for testing.
- * To use the custom "Nova" keyword, replace [KEYWORD] with
- * BuiltInKeyword.values() isn't available — you must place the
- * custom .ppn keyword file in assets/ and use the keyword path constructor:
+ * Custom keyword file: Hey-Nova_en_android_v4_0_0.ppn (must be placed in assets/)
+ * Porcupine SDK:       ai.picovoice:porcupine-android:3.0.2
+ * Generated at:        https://console.picovoice.ai/
  *
- *   PorcupineManager.Builder()
- *       .setAccessKey(PORCUPINE_ACCESS_KEY)
- *       .setKeywordPath("nova_android_<version>.ppn")   // in assets/
- *       .setSensitivity(0.7f)
- *       .build(context, wakeWordCallback)
- *
- * Custom "Nova" keyword file must be generated at: https://console.picovoice.ai/
- *
- * Boot startup: Triggered by [com.nova.companion.notification.BootReceiver] which
- * calls [context.startForegroundService(Intent(context, WakeWordService::class.java))]
- * after BOOT_COMPLETED.
+ * Boot startup: triggered by [com.nova.companion.notification.BootReceiver] which calls
+ * [context.startForegroundService(Intent(context, WakeWordService::class.java))] after
+ * BOOT_COMPLETED.
  */
 class WakeWordService : Service() {
 
     companion object {
         private const val TAG = "WakeWordService"
+
+        // Custom wake word model file — must be placed in app/src/main/assets/
+        private const val KEYWORD_ASSET = "Hey-Nova_en_android_v4_0_0.ppn"
+
+        // Sensitivity tuned to reduce false positives while keeping reliable detection
+        // Range: 0.0 (fewer false accepts) → 1.0 (fewer misses). 0.65 is a good balance.
+        private const val DEFAULT_SENSITIVITY = 0.65f
 
         // Notification channel for the foreground service notification
         const val CHANNEL_ID = "nova_wake_word"
@@ -60,8 +65,14 @@ class WakeWordService : Service() {
         // Broadcast action emitted on wake word detection
         const val ACTION_WAKE_WORD_DETECTED = "com.nova.companion.WAKE_WORD_DETECTED"
 
-        // PendingIntent request codes
+        // PendingIntent request code
         private const val PENDING_INTENT_RC = 200
+
+        // ── SharedFlow for in-process wake word events ───────────────────
+        // ChatViewModel collects this flow instead of registering a BroadcastReceiver,
+        // eliminating the IPC round-trip latency.
+        private val _wakeWordEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+        val wakeWordEvent: SharedFlow<Unit> = _wakeWordEvent.asSharedFlow()
 
         /**
          * Start the wake word service as a foreground service.
@@ -83,18 +94,18 @@ class WakeWordService : Service() {
         }
     }
 
-    // ── Internal state ────────────────────────────────────────────────
+    // ── Internal state ──────────────────────────────────────────
 
     private var porcupineManager: PorcupineManager? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // Singleton VoiceManager reference — populated by the running ViewModel
-    // We use a weak companion reference so the service doesn't hold the ViewModel alive
+    // Singleton VoiceManager reference — populated by the running ViewModel.
+    // Kept here as a local alias of the companion holder for readability.
     private var voiceManagerRef: VoiceManager? = null
 
-    // ── Service lifecycle ─────────────────────────────────────────────
+    // ── Service lifecycle ──────────────────────────────────────
 
     override fun onCreate() {
         super.onCreate()
@@ -107,7 +118,7 @@ class WakeWordService : Service() {
         Log.i(TAG, "WakeWordService starting")
         startForeground(NOTIFICATION_ID, buildNotification())
         initPorcupine()
-        return START_STICKY // Restart if killed by system
+        return START_STICKY // Restart automatically if killed by system
     }
 
     override fun onDestroy() {
@@ -120,45 +131,48 @@ class WakeWordService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // ── Porcupine initialization ──────────────────────────────────────
+    // ── Porcupine initialization ─────────────────────────────────
 
     private fun initPorcupine() {
-        // Retrieve your Picovoice access key from BuildConfig or local.properties.
-        // Add to local.properties: PICOVOICE_ACCESS_KEY=your_key_here
-        // Add to build.gradle.kts: buildConfigField("String", "PICOVOICE_ACCESS_KEY", ...)
+        // Retrieve the Picovoice access key from BuildConfig.
+        // Add to local.properties:  PICOVOICE_ACCESS_KEY=your_key_here
+        // Add to build.gradle.kts:  buildConfigField("String", "PICOVOICE_ACCESS_KEY", ...)
         val accessKey = try {
             com.nova.companion.BuildConfig::class.java
                 .getField("PICOVOICE_ACCESS_KEY")
                 .get(null) as? String ?: ""
         } catch (e: Exception) {
-            // If field not yet added to BuildConfig, use empty string — Porcupine will throw
-            // a clear error in the callback below. Add PICOVOICE_ACCESS_KEY to local.properties.
             Log.w(TAG, "PICOVOICE_ACCESS_KEY not in BuildConfig — Porcupine won't start", e)
             ""
         }
 
         if (accessKey.isBlank()) {
-            Log.e(TAG, "No Picovoice access key — wake word detection disabled. " +
-                    "Add PICOVOICE_ACCESS_KEY to local.properties.")
+            Log.e(
+                TAG,
+                "No Picovoice access key — wake word detection disabled. " +
+                    "Add PICOVOICE_ACCESS_KEY to local.properties."
+            )
             stopSelf()
             return
         }
 
+        // Allow the user to override sensitivity via SharedPreferences (Settings screen).
+        val prefs = applicationContext.getSharedPreferences("nova_settings", Context.MODE_PRIVATE)
+        val sensitivity = prefs.getFloat("wake_word_sensitivity", DEFAULT_SENSITIVITY)
+            .coerceIn(0.0f, 1.0f)
+
         try {
-            // Using PORCUPINE built-in keyword for testing.
-            // For production: replace with custom "Nova" keyword (.ppn file in assets/)
-            // using PorcupineManager.Builder().setKeywordPath("nova_en_android.ppn")
+            // Custom "Hey Nova" keyword — v4.0.0 ppn file requires Porcupine SDK 3.0.x.
+            // PorcupineManager.Builder.setKeywordPath() resolves relative paths from assets/.
             porcupineManager = PorcupineManager.Builder()
                 .setAccessKey(accessKey)
-                .setKeyword(ai.picovoice.porcupine.Porcupine.BuiltInKeyword.PORCUPINE)
-                // TODO: Replace with custom Nova keyword for production:
-                // .setKeywordPath("nova_en_android_<version>.ppn")  // place in assets/
-                .setSensitivity(0.7f) // 0.0 (fewer false accepts) to 1.0 (fewer misses)
+                .setKeywordPath(KEYWORD_ASSET)
+                .setSensitivity(sensitivity)
                 .build(applicationContext, wakeWordCallback)
 
             porcupineManager?.start()
-            Log.i(TAG, "Porcupine started — listening for wake word")
-            updateNotification("Listening for wake word...")
+            Log.i(TAG, "Porcupine started — listening for 'Hey Nova' (sensitivity=$sensitivity)")
+            updateNotification("Listening for 'Hey Nova'...")
 
         } catch (e: PorcupineException) {
             Log.e(TAG, "Failed to initialize Porcupine: ${e.message}", e)
@@ -167,10 +181,10 @@ class WakeWordService : Service() {
         }
     }
 
-    // ── Wake word callback ────────────────────────────────────────────
+    // ── Wake word callback ──────────────────────────────────────
 
     private val wakeWordCallback = PorcupineManagerCallback { keywordIndex ->
-        // Called on Porcupine's audio processing thread — dispatch to main
+        // Called on Porcupine's internal audio processing thread — dispatch to main
         Log.i(TAG, "Wake word detected! keyword index=$keywordIndex")
         serviceScope.launch(Dispatchers.Main) {
             onWakeWordDetected()
@@ -180,17 +194,23 @@ class WakeWordService : Service() {
     private fun onWakeWordDetected() {
         Log.i(TAG, "Processing wake word trigger")
 
-        // 1. Request audio focus so we can capture mic uninterrupted
+        // 1. Request audio focus so mic capture is uninterrupted
         requestAudioFocus()
 
-        // 2. Broadcast intent so any registered receivers can act
+        // 2. Vibrate the device — tactile confirmation for the user (100 ms)
+        vibrateOnWakeWord()
+
+        // 3. Broadcast intent so any registered BroadcastReceivers can act
         val broadcastIntent = Intent(ACTION_WAKE_WORD_DETECTED).apply {
             setPackage(packageName)
         }
         sendBroadcast(broadcastIntent)
 
-        // 3. If the VoiceManager singleton is available (set by ViewModel),
-        //    start listening immediately in-process (avoids broadcast round-trip latency)
+        // 4. Emit event for ChatViewModel (no BroadcastReceiver overhead)
+        _wakeWordEvent.tryEmit(Unit)
+
+        // 5. If VoiceManager singleton is available (set by ViewModel),
+        //    start listening immediately in-process to avoid broadcast round-trip latency
         val vm = ActiveVoiceManagerHolder.voiceManager
         if (vm != null) {
             serviceScope.launch(Dispatchers.Main) {
@@ -208,7 +228,46 @@ class WakeWordService : Service() {
         updateNotification("Wake word detected — listening...")
     }
 
-    // ── Audio focus ───────────────────────────────────────────────────
+    // ── Vibration ───────────────────────────────────────────────
+
+    /**
+     * Vibrate for 100 ms at DEFAULT_AMPLITUDE to give tactile feedback on wake word detection.
+     *
+     * Uses [android.os.VibratorManager] on API 31+ (S) and falls back to the legacy
+     * [android.os.Vibrator] for older APIs, using [android.os.VibrationEffect] where available.
+     */
+    private fun vibrateOnWakeWord() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager =
+                    getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
+                vibratorManager.defaultVibrator.vibrate(
+                    android.os.VibrationEffect.createOneShot(
+                        100,
+                        android.os.VibrationEffect.DEFAULT_AMPLITUDE
+                    )
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(
+                        android.os.VibrationEffect.createOneShot(
+                            100,
+                            android.os.VibrationEffect.DEFAULT_AMPLITUDE
+                        )
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(100)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Vibration failed", e)
+        }
+    }
+
+    // ── Audio focus ─────────────────────────────────────────────
 
     private fun requestAudioFocus() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -239,7 +298,7 @@ class WakeWordService : Service() {
         }
     }
 
-    // ── Porcupine teardown ────────────────────────────────────────────
+    // ── Porcupine teardown ──────────────────────────────────────
 
     private fun releasePorcupine() {
         try {
@@ -252,7 +311,7 @@ class WakeWordService : Service() {
         }
     }
 
-    // ── Notification ──────────────────────────────────────────────────
+    // ── Notification ────────────────────────────────────────────
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -272,7 +331,7 @@ class WakeWordService : Service() {
         }
     }
 
-    private fun buildNotification(statusText: String = "Waiting for 'Nova'..."): Notification {
+    private fun buildNotification(statusText: String = "Waiting for 'Hey Nova'..."): Notification {
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -288,7 +347,7 @@ class WakeWordService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Nova is listening")
             .setContentText(statusText)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now) // Replace with R.drawable.ic_nova_mic when available
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setSilent(true)
