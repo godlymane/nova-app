@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
@@ -25,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -209,6 +211,10 @@ fun SoundWaveVisualizer(
 /**
  * Voice state indicator shown in the chat area.
  * Displays different visuals based on the voice pipeline state.
+ *
+ * Added states vs. original:
+ * - IDLE: breathing purple orb with "Say 'Nova'..." prompt text
+ * - ERROR: red pulsing circle with error icon and "Something went wrong" text
  */
 @Composable
 fun VoiceStateIndicator(
@@ -218,8 +224,107 @@ fun VoiceStateIndicator(
     modifier: Modifier = Modifier
 ) {
     when (voiceState) {
+
+        // ── IDLE: breathing purple orb ─────────────────────────────────
+        VoiceState.IDLE -> {
+            val infiniteTransition = rememberInfiniteTransition(label = "idleOrb")
+
+            // Gentle heartbeat scale: 1.0 → 1.08 → 1.0 with a slight pause between pulses
+            val orbScale by infiniteTransition.animateFloat(
+                initialValue = 1f,
+                targetValue = 1.08f,
+                animationSpec = infiniteRepeatable(
+                    animation = keyframes {
+                        durationMillis = 2400
+                        1f at 0 with FastOutSlowInEasing
+                        1.08f at 400 with FastOutSlowInEasing
+                        1f at 800 with FastOutSlowInEasing
+                        1.04f at 1100 with FastOutSlowInEasing
+                        1f at 1400 with LinearEasing
+                        // rest from 1400–2400 ms
+                    },
+                    repeatMode = RepeatMode.Restart
+                ),
+                label = "orbScale"
+            )
+
+            // Glow alpha pulses in sync with scale
+            val glowAlpha by infiniteTransition.animateFloat(
+                initialValue = 0.15f,
+                targetValue = 0.45f,
+                animationSpec = infiniteRepeatable(
+                    animation = keyframes {
+                        durationMillis = 2400
+                        0.15f at 0 with FastOutSlowInEasing
+                        0.45f at 400 with FastOutSlowInEasing
+                        0.15f at 800 with FastOutSlowInEasing
+                        0.30f at 1100 with FastOutSlowInEasing
+                        0.15f at 1400 with LinearEasing
+                    },
+                    repeatMode = RepeatMode.Restart
+                ),
+                label = "glowAlpha"
+            )
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 20.dp)
+            ) {
+                // Orb: glow ring + solid core
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.size(64.dp)
+                ) {
+                    // Outer glow ring
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp)
+                            .scale(orbScale * 1.3f)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.radialGradient(
+                                    listOf(
+                                        NovaPurple.copy(alpha = glowAlpha),
+                                        WaveformPurple.copy(alpha = glowAlpha * 0.5f),
+                                        Color.Transparent
+                                    )
+                                )
+                            )
+                    )
+                    // Inner orb core
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .scale(orbScale)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.radialGradient(
+                                    listOf(
+                                        WaveformPurpleLight,
+                                        NovaPurple,
+                                        NovaPurple.copy(alpha = 0.7f)
+                                    )
+                                )
+                            )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Say 'Nova'...",
+                    color = NovaTextDim,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Normal,
+                    letterSpacing = 0.5.sp
+                )
+            }
+        }
+
+        // ── LISTENING: pulsing red dot + partial transcription ─────────
         VoiceState.LISTENING -> {
-            // Show recording indicator with partial transcription
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = modifier
@@ -230,7 +335,6 @@ fun VoiceStateIndicator(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center
                 ) {
-                    // Pulsing red dot
                     PulsingDot(color = MicRed)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
@@ -253,8 +357,8 @@ fun VoiceStateIndicator(
             }
         }
 
+        // ── TRANSCRIBING: amber dots + status text ─────────────────────
         VoiceState.TRANSCRIBING -> {
-            // Show transcribing indicator
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center,
@@ -272,8 +376,8 @@ fun VoiceStateIndicator(
             }
         }
 
+        // ── THINKING: purple dots + status text ───────────────────────
         VoiceState.THINKING -> {
-            // Show LLM thinking indicator
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center,
@@ -291,8 +395,8 @@ fun VoiceStateIndicator(
             }
         }
 
+        // ── SPEAKING: waveform visualizer ──────────────────────────────
         VoiceState.SPEAKING -> {
-            // Show speaking indicator with waveform
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center,
@@ -314,7 +418,55 @@ fun VoiceStateIndicator(
             }
         }
 
-        else -> { /* IDLE or ERROR - no indicator */ }
+        // ── ERROR: red pulsing circle + error icon + message ───────────
+        VoiceState.ERROR -> {
+            val infiniteTransition = rememberInfiniteTransition(label = "errorPulse")
+            val errorPulse by infiniteTransition.animateFloat(
+                initialValue = 0.5f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(700, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "errorPulseAlpha"
+            )
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    // Pulsing red halo
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(MicRed.copy(alpha = errorPulse * 0.25f))
+                    )
+                    // Error icon
+                    Icon(
+                        imageVector = Icons.Default.ErrorOutline,
+                        contentDescription = "Error",
+                        tint = MicRed.copy(alpha = errorPulse),
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Something went wrong",
+                    color = MicRed,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
     }
 }
 
