@@ -39,6 +39,7 @@ android {
         buildConfigField("String", "GEMINI_API_KEY", "\"${getLocalProperty("GEMINI_API_KEY")}\"")
         buildConfigField("String", "ANTHROPIC_API_KEY", "\"${getLocalProperty("ANTHROPIC_API_KEY")}\"")
         buildConfigField("String", "PICOVOICE_ACCESS_KEY", "\"${getLocalProperty("PICOVOICE_ACCESS_KEY")}\"")
+        buildConfigField("String", "OPENWEATHER_API_KEY", "\"${getLocalProperty("OPENWEATHER_API_KEY")}\"")
 
         ndk {
             abiFilters += listOf("arm64-v8a")

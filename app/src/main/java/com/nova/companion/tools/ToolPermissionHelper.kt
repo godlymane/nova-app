@@ -34,6 +34,9 @@ object ToolPermissionHelper {
         Manifest.permission.RECORD_AUDIO
     )
 
+    // Tier 3 tools use intents and deep links — no additional runtime permissions needed.
+    // INTERNET is a normal permission (declared in manifest, auto-granted).
+
     /**
      * Check if a permission is currently granted.
      */
