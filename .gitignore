@@ -5,12 +5,24 @@ node_modules/
 models/*.gguf
 models/*.bin
 !models/.gitkeep
+*.gguf
 
 # Build outputs
 src/app/dist/
 src/app/android/app/build/
+app/build/
+build/
 *.apk
 *.aab
+
+# Gradle
+.gradle/
+local.properties
+
+# Native build
+app/src/main/cpp/llama.cpp/
+app/.cxx/
+.externalNativeBuild/
 
 # IDE
 .idea/

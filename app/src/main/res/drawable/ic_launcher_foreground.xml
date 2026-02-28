@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Nova star icon -->
+    <path
+        android:fillColor="#6C3AED"
+        android:pathData="M54,28 L59,44 L76,44 L62,53 L67,69 L54,60 L41,69 L46,53 L32,44 L49,44 Z"/>
+    <!-- Inner glow -->
+    <path
+        android:fillColor="#A78BFA"
+        android:pathData="M54,36 L57,45 L66,45 L59,50 L62,60 L54,54 L46,60 L49,50 L42,45 L51,45 Z"/>
+</vector>
