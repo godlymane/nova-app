@@ -49,10 +49,16 @@
     <!-- Wake lock for keeping CPU awake during wake word detection and voice processing -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Tier 1 Tool Permissions -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+
     <!-- Declare hardware features (not required, for Play Store filtering) -->
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
     <application
         android:name=".NovaApp"
@@ -86,11 +92,6 @@
             </intent-filter>
         </receiver>
 
-        <!--
-            Wake word foreground service.
-            Uses foregroundServiceType="microphone" as required on Android 14+ (API 34)
-            for any foreground service that accesses the microphone.
-        -->
         <service
             android:name=".voice.WakeWordService"
             android:exported="false"
