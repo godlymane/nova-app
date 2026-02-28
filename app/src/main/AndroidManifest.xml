@@ -1,101 +1,78 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Storage access for loading model files -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
+    <!-- ========== TIER 1 PERMISSIONS ========== -->
 
-    <!-- For large model files, request broad storage on older APIs -->
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
-        tools:ignore="ScopedStorage" />
-
-    <!-- Notifications (required on Android 13+) -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- Boot completed to reschedule notifications after reboot and start wake word service -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-
-    <!-- Voice input: microphone access for Whisper STT, ElevenLabs, and wake word detection -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-
-    <!-- Internet for cloud APIs (OpenAI, ElevenLabs, Gemini, Anthropic) -->
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!-- Alarm and timer tools -->
-    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
-
-    <!-- Flashlight tool -->
-    <uses-permission android:name="android.permission.CAMERA" />
-
-    <!-- Bluetooth toggle tool -->
-    <uses-permission android:name="android.permission.BLUETOOTH" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-
-    <!-- Do Not Disturb tool -->
-    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
-
-    <!-- Vibrate for notifications -->
-    <uses-permission android:name="android.permission.VIBRATE" />
-
-    <!-- Foreground service permission (required for API 28+) -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-
-    <!-- Foreground service microphone type (required for Android 14+ when using microphone in foreground service) -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-
-    <!-- Wake lock for keeping CPU awake during wake word detection and voice processing -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-
-    <!-- Tier 1 Tool Permissions -->
-    <uses-permission android:name="android.permission.SEND_SMS" />
+    <!-- Phone & Calls -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+    <!-- SMS -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+
+    <!-- Contacts -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
 
-    <!-- Declare hardware features (not required, for Play Store filtering) -->
-    <uses-feature android:name="android.hardware.microphone" android:required="false" />
-    <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
-    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+    <!-- Location -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Camera & Audio -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- ========== TIER 2 PERMISSIONS ========== -->
+
+    <!-- WiFi -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- Bluetooth (API 31+ requires BLUETOOTH_CONNECT for direct toggle) -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Screen brightness (WRITE_SETTINGS requested via intent at runtime) -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+
+    <!-- Do Not Disturb (ACCESS_NOTIFICATION_POLICY requested via intent at runtime) -->
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+
+    <!-- Internet -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
-        android:name=".NovaApp"
-        android:allowBackup="false"
-        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="true"
         android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Nova"
-        android:largeHeap="true"
-        android:enableOnBackInvokedCallback="true"
-        tools:targetApi="35">
+        android:theme="@style/Theme.NovaCompanion">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:windowSoftInputMode="adjustResize"
-            android:theme="@style/Theme.Nova">
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- Boot receiver to reschedule notifications and restart wake word service after reboot -->
-        <receiver
-            android:name=".notification.BootReceiver"
+        <!-- ========== TIER 2 SERVICES ========== -->
+
+        <!-- NotificationListenerService for readNotifications tool -->
+        <service
+            android:name=".services.NovaNotificationListener"
+            android:label="Nova Notification Access"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
             android:exported="true">
             <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
-        </receiver>
-
-        <service
-            android:name=".voice.WakeWordService"
-            android:exported="false"
-            android:foregroundServiceType="microphone" />
+        </service>
 
     </application>
+
 </manifest>

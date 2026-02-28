@@ -1,13 +1,14 @@
 package com.nova.companion.tools
 
 import com.nova.companion.tools.tier1.Tier1ToolRegistry
+import com.nova.companion.tools.tier2.Tier2ToolRegistry
 
 object NovaToolRegistry {
 
-    fun registerAll(registry: ToolRegistry) {
+    fun buildRegistry(): ToolRegistry {
+        val registry = ToolRegistry()
         Tier1ToolRegistry.registerAll(registry)
-        // Tier2ToolRegistry.registerAll(registry)
-        // Tier3ToolRegistry.registerAll(registry)
-        // Tier4ToolRegistry.registerAll(registry)
+        Tier2ToolRegistry.registerAll(registry)
+        return registry
     }
 }
