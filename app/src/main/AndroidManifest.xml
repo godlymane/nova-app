@@ -1,102 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- ========== TIER 1 PERMISSIONS ========== -->
-
-    <!-- Phone & Calls -->
-    <uses-permission android:name="android.permission.CALL_PHONE" />
-    <uses-permission android:name="android.permission.READ_CALL_LOG" />
-    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
-
-    <!-- SMS -->
-    <uses-permission android:name="android.permission.SEND_SMS" />
-    <uses-permission android:name="android.permission.READ_SMS" />
-    <uses-permission android:name="android.permission.RECEIVE_SMS" />
-
-    <!-- Contacts -->
-    <uses-permission android:name="android.permission.READ_CONTACTS" />
-
-    <!-- Location -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-
-    <!-- Camera & Audio -->
-    <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-
-    <!-- ========== TIER 2 PERMISSIONS ========== -->
-
-    <!-- WiFi -->
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-
-    <!-- Bluetooth (API 31+ requires BLUETOOTH_CONNECT for direct toggle) -->
-    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-
-    <!-- Screen brightness (WRITE_SETTINGS requested via intent at runtime) -->
-    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
-
-    <!-- Do Not Disturb (ACCESS_NOTIFICATION_POLICY requested via intent at runtime) -->
-    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
-
-    <!-- ========== NOVA BRAIN PERMISSIONS ========== -->
-
-    <!-- Calendar -->
-    <uses-permission android:name="android.permission.READ_CALENDAR" />
-
-    <!-- Location (foreground service type) -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
-
-    <!-- App usage stats (requires user to grant via Settings > Special app access) -->
-    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
-        tools:ignore="ProtectedPermissions" />
-
-    <!-- Foreground service type for ContextEngine -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-
-    <!-- ========== OVERLAY PERMISSION ========== -->
-
-    <!-- System overlay for aura effect on top of all apps -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-
-    <!-- ========== CORE SYSTEM PERMISSIONS ========== -->
-
-    <!-- Internet -->
+    <!-- Network -->
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- Vibrate -->
-    <uses-permission android:name="android.permission.VIBRATE" />
-
-    <!-- Foreground service -->
+    <!-- Overlay / Bubble -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!-- Notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- Boot completed -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-
-    <!-- Wake lock -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-
-    <!-- ========== TIER 4 PERMISSIONS ========== -->
-    <!-- Note: No runtime permissions needed for AccessibilityService -->
-    <!-- The user enables it manually in Settings > Accessibility -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <application
+        android:name=".NovaApp"
         android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.NovaCompanion">
 
+        <!-- Main Activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -104,59 +34,26 @@
             </intent-filter>
         </activity>
 
-        <!-- ========== TIER 2 SERVICES ========== -->
-
-        <!-- NotificationListenerService for readNotifications tool -->
+        <!-- Task Bubble Overlay Service -->
         <service
-            android:name=".services.NovaNotificationListener"
-            android:label="Nova Notification Access"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
-            </intent-filter>
-        </service>
-
-        <!-- ========== NOVA BRAIN SERVICES ========== -->
-
-        <!-- Nova Brain: ContextEngine foreground service -->
-        <service
-            android:name=".brain.context.ContextEngine"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="location|specialUse"
-            android:permission="android.permission.FOREGROUND_SERVICE">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Nova context collection for personalized assistance" />
-        </service>
-
-        <!-- ========== AURA OVERLAY SERVICE ========== -->
-
-        <service
-            android:name=".overlay.AuraOverlayService"
+            android:name=".overlay.bubble.TaskBubbleService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Nova ambient aura visual overlay" />
+                android:value="overlayService" />
         </service>
 
-        <!-- ========== TIER 4 SERVICES ========== -->
-
-        <!-- AccessibilityService for UI automation -->
-        <service
-            android:name=".accessibility.NovaAccessibilityService"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-            android:label="Nova Companion"
+        <!-- WorkManager Initialization -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
             android:exported="false">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
             <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/nova_accessibility_config" />
-        </service>
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
 
     </application>
 
