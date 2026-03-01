@@ -13,9 +13,10 @@ import com.nova.companion.data.entity.*
         Memory::class,
         UserProfile::class,
         DailySummary::class,
-        MessageEntity::class
+        MessageEntity::class,
+        UserFact::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class NovaDatabase : RoomDatabase() {
@@ -25,6 +26,7 @@ abstract class NovaDatabase : RoomDatabase() {
     abstract fun userProfileDao(): UserProfileDao
     abstract fun dailySummaryDao(): DailySummaryDao
     abstract fun messageDao(): MessageDao
+    abstract fun userFactDao(): UserFactDao
 
     companion object {
         @Volatile

@@ -24,6 +24,184 @@ class MemoryManager(private val db: NovaDatabase) {
     }
 
     // ────────────────────────────────────────────────────────────
+    // STRUCTURED FACT EXTRACTION (Deep Memory)
+    // ────────────────────────────────────────────────────────────
+
+    /**
+     * Extract structured key-value facts from a conversation exchange.
+     * These go into the user_facts table for reliable recall.
+     */
+    suspend fun extractAndStoreFacts(userMessage: String, novaResponse: String) {
+        val msg = userMessage.lowercase().trim()
+
+        // ── NAME ──
+        val namePatterns = listOf(
+            Regex("""(?:my name is|i'm|im|call me|i am)\s+([A-Z][a-z]{1,20})"""),
+            Regex("""(?:name's)\s+([A-Z][a-z]{1,20})""")
+        )
+        for (pattern in namePatterns) {
+            pattern.find(userMessage)?.let { match ->
+                storeFact("name", match.groupValues[1], "personal", 9)
+                return@let
+            }
+        }
+
+        // ── AGE ──
+        val agePattern = Regex("""(?:i'm|im|i am)\s+(\d{1,2})\s*(?:years old|yrs|yo|year old)""")
+        agePattern.find(msg)?.let { match ->
+            storeFact("age", match.groupValues[1], "personal", 9)
+        }
+
+        // ── LOCATION / CITY ──
+        val locationPatterns = listOf(
+            Regex("""(?:i live in|i'm from|im from|based in|i stay in|living in)\s+([A-Za-z\s]{2,30})"""),
+            Regex("""(?:from)\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)""")
+        )
+        for (pattern in locationPatterns) {
+            pattern.find(msg)?.let { match ->
+                storeFact("location", match.groupValues[1].trim(), "personal", 7)
+                return@let
+            }
+        }
+
+        // ── FITNESS FACTS ──
+        val benchPattern = Regex("""(?:bench(?:ed| press)?)\s+(\d+)\s*(?:kg|lbs|pounds)""")
+        benchPattern.find(msg)?.let { match ->
+            val unit = if (msg.contains("lbs") || msg.contains("pounds")) "lbs" else "kg"
+            storeFact("bench_press_pr", "${match.groupValues[1]} $unit", "fitness", 9)
+        }
+
+        val squatPattern = Regex("""(?:squatted|squat)\s+(\d+)\s*(?:kg|lbs|pounds)""")
+        squatPattern.find(msg)?.let { match ->
+            val unit = if (msg.contains("lbs") || msg.contains("pounds")) "lbs" else "kg"
+            storeFact("squat_pr", "${match.groupValues[1]} $unit", "fitness", 9)
+        }
+
+        val deadliftPattern = Regex("""(?:deadlifted|deadlift)\s+(\d+)\s*(?:kg|lbs|pounds)""")
+        deadliftPattern.find(msg)?.let { match ->
+            val unit = if (msg.contains("lbs") || msg.contains("pounds")) "lbs" else "kg"
+            storeFact("deadlift_pr", "${match.groupValues[1]} $unit", "fitness", 9)
+        }
+
+        val weightPattern = Regex("""(?:weigh|weight|im|i'm|i am)\s+(\d{2,3})\s*(?:kg|lbs|pounds)""")
+        weightPattern.find(msg)?.let { match ->
+            val unit = if (msg.contains("lbs") || msg.contains("pounds")) "lbs" else "kg"
+            storeFact("body_weight", "${match.groupValues[1]} $unit", "fitness", 8)
+        }
+
+        if (msg.contains("cutting") || msg.contains("cut phase") || msg.contains("on a cut")) {
+            storeFact("fitness_phase", "cutting", "fitness", 7)
+        }
+        if (msg.contains("bulking") || msg.contains("bulk phase") || msg.contains("on a bulk")) {
+            storeFact("fitness_phase", "bulking", "fitness", 7)
+        }
+
+        // ── BUSINESS FACTS ──
+        if (msg.contains("blayzex")) {
+            storeFact("startup_name", "Blayzex", "business", 9)
+        }
+
+        val revenuePattern = Regex("""(?:revenue|made|earned|sold).*?\$\s*(\d[\d,.]+)""")
+        revenuePattern.find(msg)?.let { match ->
+            storeFact("last_revenue_mention", "$${match.groupValues[1]}", "business", 8)
+        }
+
+        // ── PREFERENCE FACTS ──
+        val favFoodPatterns = listOf(
+            Regex("""(?:favorite food|love eating|i love|fav food)(?:\s+is)?\s+([a-z\s]{2,25})"""),
+            Regex("""(?:can't live without|obsessed with|addicted to)\s+([a-z\s]{2,25})""")
+        )
+        for (pattern in favFoodPatterns) {
+            pattern.find(msg)?.let { match ->
+                storeFact("favorite_food", match.groupValues[1].trim(), "preference", 6)
+                return@let
+            }
+        }
+
+        val musicPatterns = listOf(
+            Regex("""(?:listen to|love|into|favorite (?:artist|band|music))\s+([A-Za-z\s]{2,30})"""),
+        )
+        for (pattern in musicPatterns) {
+            pattern.find(msg)?.let { match ->
+                val value = match.groupValues[1].trim()
+                if (value.length > 2) {
+                    storeFact("music_taste", value, "preference", 5)
+                }
+                return@let
+            }
+        }
+
+        // ── RELATIONSHIP FACTS ──
+        val relationshipPatterns = listOf(
+            Regex("""(?:my (?:girlfriend|gf|girl)|dating)\s+(?:is\s+)?([A-Z][a-z]+)"""),
+            Regex("""(?:my (?:brother|bro))\s+(?:is\s+)?([A-Z][a-z]+)"""),
+            Regex("""(?:my (?:sister|sis))\s+(?:is\s+)?([A-Z][a-z]+)"""),
+            Regex("""(?:my (?:mom|mother))\s+(?:is\s+)?([A-Z][a-z]+)"""),
+            Regex("""(?:my (?:dad|father))\s+(?:is\s+)?([A-Z][a-z]+)"""),
+            Regex("""(?:my (?:best friend|bestie))\s+(?:is\s+)?([A-Z][a-z]+)""")
+        )
+        val relationKeys = listOf("girlfriend_name", "brother_name", "sister_name", "mother_name", "father_name", "best_friend_name")
+        for ((i, pattern) in relationshipPatterns.withIndex()) {
+            pattern.find(userMessage)?.let { match ->
+                storeFact(relationKeys[i], match.groupValues[1], "relationship", 8)
+            }
+        }
+
+        // ── CODING / TECH FACTS ──
+        val projectPattern = Regex("""(?:working on|building|developing|shipping|launched)\s+(?:a\s+)?([A-Za-z][A-Za-z0-9\s]{2,30})""")
+        projectPattern.find(msg)?.let { match ->
+            storeFact("current_project", match.groupValues[1].trim(), "coding", 6)
+        }
+
+        // ── EDUCATION FACTS ──
+        val collegePattern = Regex("""(?:studying at|go to|attend|college is|university is)\s+([A-Za-z\s]{3,40})""")
+        collegePattern.find(msg)?.let { match ->
+            storeFact("college", match.groupValues[1].trim(), "personal", 8)
+        }
+
+        val majorPattern = Regex("""(?:majoring in|studying|my major is|major in)\s+([A-Za-z\s]{3,30})""")
+        majorPattern.find(msg)?.let { match ->
+            storeFact("major", match.groupValues[1].trim(), "personal", 7)
+        }
+
+        Log.d(TAG, "Fact extraction complete for message: ${userMessage.take(50)}")
+    }
+
+    /**
+     * Store or update a structured fact in the database.
+     */
+    private suspend fun storeFact(key: String, value: String, category: String, confidence: Int) {
+        db.userFactDao().upsert(
+            com.nova.companion.data.entity.UserFact(
+                key = key,
+                value = value,
+                category = category,
+                confidence = confidence
+            )
+        )
+        Log.d(TAG, "Stored fact: $key = $value [$category] (confidence=$confidence)")
+    }
+
+    /**
+     * Build a structured facts context string for injection into prompts.
+     * Returns facts grouped by category for clean formatting.
+     */
+    suspend fun buildFactsContext(): String {
+        val facts = db.userFactDao().getHighConfidence(minConfidence = 4, limit = 30)
+        if (facts.isEmpty()) return ""
+
+        val grouped = facts.groupBy { it.category }
+        val parts = mutableListOf<String>()
+
+        for ((category, categoryFacts) in grouped) {
+            val factsStr = categoryFacts.joinToString(", ") { "${it.key}: ${it.value}" }
+            parts.add("$category — $factsStr")
+        }
+
+        return "Known facts about user: " + parts.joinToString("; ")
+    }
+
+    // ────────────────────────────────────────────────────────────
     // MEMORY EXTRACTION
     // ────────────────────────────────────────────────────────────
 
@@ -352,18 +530,16 @@ class MemoryManager(private val db: NovaDatabase) {
             }
         }
 
-        // Sort by score descending, return top results
-        val results = scoredMemories.values
+        return scoredMemories.values
             .sortedByDescending { it.second }
             .take(limit)
             .map { it.first }
-
-        // Mark as accessed
-        for (memory in results) {
-            db.memoryDao().markAccessed(memory.id)
-        }
-
-        return results
+            .also { memories ->
+                // Mark all recalled memories as accessed
+                memories.forEach { memory ->
+                    db.memoryDao().markAccessed(memory.id)
+                }
+            }
     }
 
     /**
@@ -371,107 +547,76 @@ class MemoryManager(private val db: NovaDatabase) {
      */
     private fun extractKeywords(message: String): List<String> {
         val stopWords = setOf(
-            "i", "me", "my", "the", "a", "an", "is", "am", "are", "was", "were",
-            "be", "been", "being", "have", "has", "had", "do", "does", "did",
-            "will", "would", "could", "should", "can", "may", "might",
-            "to", "of", "in", "for", "on", "with", "at", "by", "from",
-            "it", "its", "this", "that", "these", "those", "what", "which",
-            "who", "whom", "how", "when", "where", "why", "not", "no",
-            "so", "if", "or", "and", "but", "just", "about", "like",
-            "bro", "yo", "hey", "nah", "yeah", "yea", "lol", "lmao",
-            "im", "ive", "dont", "cant", "wont", "gonna", "gotta",
-            "up", "out", "some", "any", "all", "very", "really", "pretty",
-            "much", "too", "also", "still", "even", "more", "most",
-            "than", "then", "now", "here", "there", "thing", "things"
+            "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "could",
+            "should", "may", "might", "shall", "can", "need", "dare", "ought",
+            "i", "me", "my", "myself", "we", "our", "you", "your", "he", "she",
+            "it", "they", "them", "this", "that", "these", "those", "what", "which",
+            "who", "whom", "whose", "when", "where", "why", "how", "all", "any",
+            "both", "each", "few", "more", "most", "other", "some", "such",
+            "no", "not", "only", "own", "same", "so", "than", "too", "very",
+            "just", "but", "and", "or", "if", "then", "about", "into", "through",
+            "during", "before", "after", "above", "below", "to", "from", "up",
+            "down", "in", "out", "on", "off", "over", "under", "again", "further",
+            "once", "at", "by", "for", "with", "of", "im", "ive", "dont",
+            "cant", "wont", "lets", "got", "get", "like", "know", "think", "want"
         )
 
         return message.lowercase()
-            .replace(Regex("[^a-z0-9\\s]"), "")
+            .replace(Regex("[^a-z0-9\\s]"), " ")
             .split("\\s+".toRegex())
             .filter { it.length > 2 && it !in stopWords }
             .distinct()
+            .take(10)
     }
 
     // ────────────────────────────────────────────────────────────
-    // CONTEXT INJECTION
+    // CONTEXT BUILDING
     // ────────────────────────────────────────────────────────────
 
     /**
-     * Build an enhanced system prompt with relevant memories, profile, and summaries.
-     * This string gets appended to the base system prompt before each generation.
+     * Build the full memory context block for Nova's system prompt.
+     * Injects profile + relevant memories + recent daily summaries.
      */
-    suspend fun injectContext(currentMessage: String): String {
+    suspend fun buildContext(currentMessage: String): String {
         val parts = mutableListOf<String>()
 
-        // Recall relevant memories
-        val memories = recall(currentMessage, MAX_CONTEXT_MEMORIES)
+        // 1. User profile
+        val profile = db.userProfileDao().get()
+        if (profile != null) {
+            val profileParts = mutableListOf<String>()
+            if (profile.name.isNotBlank()) profileParts.add("Name: ${profile.name}")
+            if (profile.age > 0) profileParts.add("Age: ${profile.age}")
+            if (profile.location.isNotBlank()) profileParts.add("Location: ${profile.location}")
+            if (profile.occupation.isNotBlank()) profileParts.add("Occupation: ${profile.occupation}")
+            if (profile.fitness.isNotBlank()) profileParts.add("Fitness: ${profile.fitness}")
+            if (profile.goals.isNotBlank()) profileParts.add("Goals: ${profile.goals}")
+            if (profileParts.isNotEmpty()) {
+                parts.add("USER PROFILE: " + profileParts.joinToString(" | "))
+            }
+        }
+
+        // 2. Structured facts (new deep memory)
+        val factsContext = buildFactsContext()
+        if (factsContext.isNotBlank()) {
+            parts.add(factsContext)
+        }
+
+        // 3. Relevant memories
+        val memories = recall(currentMessage)
         if (memories.isNotEmpty()) {
-            val memStr = memories.joinToString(", ") { it.content }
-            parts.add("You remember: $memStr")
+            val memoriesStr = memories.joinToString("\n") { "- ${it.content}" }
+            parts.add("RELEVANT MEMORIES:\n$memoriesStr")
         }
 
-        // Get user profile facts
-        val profileEntries = db.userProfileDao().getAll().take(MAX_PROFILE_ENTRIES)
-        if (profileEntries.isNotEmpty()) {
-            val profileStr = profileEntries.joinToString(", ") { "${it.key}: ${it.value}" }
-            parts.add("User profile: $profileStr")
-        }
-
-        // Get recent daily summaries
+        // 4. Recent daily summaries
         val summaries = db.dailySummaryDao().getRecent(MAX_RECENT_SUMMARIES)
         if (summaries.isNotEmpty()) {
-            val summStr = summaries.joinToString(" | ") { "${it.date}: ${it.summary}" }
-            parts.add("Recent context: $summStr")
+            val summariesStr = summaries.joinToString("\n") { "[${it.date}]: ${it.summary}" }
+            parts.add("RECENT DAYS:\n$summariesStr")
         }
 
-        return if (parts.isNotEmpty()) {
-            "\n\n" + parts.joinToString("\n")
-        } else {
-            ""
-        }
-    }
-
-    // ────────────────────────────────────────────────────────────
-    // USER PROFILE
-    // ────────────────────────────────────────────────────────────
-
-    suspend fun updateProfile(key: String, value: String) {
-        db.userProfileDao().upsert(
-            UserProfile(key = key, value = value, updatedAt = System.currentTimeMillis())
-        )
-        Log.d(TAG, "Profile updated: $key = $value")
-    }
-
-    /** Fire-and-forget profile update (used inside extraction) */
-    private var pendingProfileUpdates = mutableListOf<Pair<String, String>>()
-
-    private fun updateProfileAsync(key: String, value: String) {
-        pendingProfileUpdates.add(key to value)
-    }
-
-    /** Flush any pending profile updates. Called at end of extractMemories. */
-    suspend fun flushProfileUpdates() {
-        for ((key, value) in pendingProfileUpdates) {
-            updateProfile(key, value)
-        }
-        pendingProfileUpdates.clear()
-    }
-
-    /**
-     * Extract and auto-update user profile from message patterns.
-     */
-    private fun extractProfileUpdates(msg: String, original: String) {
-        // Name
-        val namePattern = Regex("""(?:my name is|i'm|im|call me)\s+([A-Z][a-z]+)""")
-        namePattern.find(original)?.let {
-            updateProfileAsync("name", it.groupValues[1])
-        }
-
-        // Age
-        val agePattern = Regex("""(?:i'm|im|i am)\s+(\d{2})\s*(?:years old|yrs|yo)""")
-        agePattern.find(msg)?.let {
-            updateProfileAsync("age", it.groupValues[1])
-        }
+        return if (parts.isEmpty()) "" else parts.joinToString("\n\n")
     }
 
     // ────────────────────────────────────────────────────────────
@@ -479,128 +624,129 @@ class MemoryManager(private val db: NovaDatabase) {
     // ────────────────────────────────────────────────────────────
 
     /**
-     * Generate a daily summary for yesterday's conversations.
-     * Call this on app open after midnight, or via WorkManager.
+     * Generate and store a daily summary of conversations.
+     * Should be called once per day (e.g., at midnight or on app start).
      */
-    suspend fun generateDailySummary(dateOverride: String? = null): DailySummary? {
-        val targetDate = dateOverride ?: run {
-            val cal = Calendar.getInstance()
-            cal.add(Calendar.DAY_OF_YEAR, -1)
-            DATE_FORMAT.format(cal.time)
-        }
+    suspend fun generateDailySummary() {
+        val today = DATE_FORMAT.format(Date())
+        val existing = db.dailySummaryDao().getByDate(today)
+        if (existing != null) return  // Already summarized today
 
-        // Check if we already have a summary for this date
-        val existing = db.dailySummaryDao().getByDate(targetDate)
-        if (existing != null) {
-            Log.d(TAG, "Summary already exists for $targetDate")
-            return existing
-        }
+        // Get today's important memories
+        val todayStart = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+        }.timeInMillis
 
-        // Get conversations for that date
-        val cal = Calendar.getInstance()
-        cal.time = DATE_FORMAT.parse(targetDate) ?: return null
-        cal.set(Calendar.HOUR_OF_DAY, 0)
-        cal.set(Calendar.MINUTE, 0)
-        cal.set(Calendar.SECOND, 0)
-        cal.set(Calendar.MILLISECOND, 0)
-        val dayStart = cal.timeInMillis
-        val dayEnd = dayStart + TimeUnit.DAYS.toMillis(1)
-
-        val conversations = db.conversationDao().getByDateRange(dayStart, dayEnd)
-        if (conversations.isEmpty()) {
-            Log.d(TAG, "No conversations found for $targetDate")
-            return null
-        }
-
-        // Build a simple summary from conversation topics
-        val allUserMessages = conversations.map { it.userMessage.lowercase() }
-        val topicCounts = mutableMapOf<String, Int>()
-        val categoryKeywords = mapOf(
-            "fitness" to listOf("gym", "workout", "bench", "squat", "deadlift", "cardio", "weight", "training", "gains", "pr"),
-            "business" to listOf("blayzex", "brand", "client", "revenue", "launch", "marketing", "sale", "startup"),
-            "coding" to listOf("code", "bug", "deploy", "api", "app", "kotlin", "android", "database", "server"),
-            "emotional" to listOf("stressed", "happy", "frustrated", "motivated", "tired", "anxious", "excited"),
-            "personal" to listOf("anime", "sleep", "food", "girl", "friend", "family")
-        )
-
-        for ((topic, keywords) in categoryKeywords) {
-            val count = allUserMessages.count { msg -> keywords.any { msg.contains(it) } }
-            if (count > 0) topicCounts[topic] = count
-        }
-
-        val topTopics = topicCounts.entries.sortedByDescending { it.value }.take(3)
-        val keyEvents = topTopics.map { it.key }
+        val todayMemories = db.memoryDao().getMemoriesSince(todayStart, 20)
+        if (todayMemories.isEmpty()) return
 
         // Build summary text
-        val summaryText = buildString {
-            append("${conversations.size} conversations. ")
-            if (topTopics.isNotEmpty()) {
-                append("Talked about: ${topTopics.joinToString(", ") { "${it.key} (${it.value}x)" }}. ")
-            }
-            // Pull a highlight from highest importance topic
-            val highlight = allUserMessages.firstOrNull { msg ->
-                msg.length > 20 && topTopics.firstOrNull()?.let { top ->
-                    categoryKeywords[top.key]?.any { msg.contains(it) } == true
-                } == true
-            }
-            if (highlight != null) {
-                append("Notable: \"${highlight.take(60)}\"")
+        val summary = buildSummaryText(todayMemories)
+
+        db.dailySummaryDao().insert(
+            DailySummary(
+                date = today,
+                summary = summary,
+                memoryCount = todayMemories.size
+            )
+        )
+
+        Log.d(TAG, "Daily summary generated: $summary")
+    }
+
+    private fun buildSummaryText(memories: List<Memory>): String {
+        val byCategory = memories.groupBy { it.category }
+        val parts = mutableListOf<String>()
+
+        byCategory["fitness"]?.let { list ->
+            parts.add("Fitness: ${list.map { it.content }.joinToString("; ").take(100)}")
+        }
+        byCategory["business"]?.let { list ->
+            parts.add("Business: ${list.map { it.content }.joinToString("; ").take(100)}")
+        }
+        byCategory["emotional"]?.let { list ->
+            parts.add("Mood: ${list.map { it.content }.joinToString("; ").take(80)}")
+        }
+        byCategory["goals"]?.let { list ->
+            parts.add("Goals: ${list.map { it.content }.joinToString("; ").take(80)}")
+        }
+        byCategory["coding"]?.let { list ->
+            parts.add("Coding: ${list.map { it.content }.joinToString("; ").take(80)}")
+        }
+
+        return parts.joinToString(". ")
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // PROFILE UPDATES
+    // ────────────────────────────────────────────────────────────
+
+    /**
+     * Auto-extract profile fields from a message.
+     */
+    private suspend fun extractProfileUpdates(msg: String, original: String) {
+        // Age
+        val agePattern = Regex("""(?:i'm|im|i am)\s+(\d{1,2})\s*(?:years old|yrs|yo|year old)""")
+        agePattern.find(msg)?.let { match ->
+            db.userProfileDao().get()?.let { profile ->
+                db.userProfileDao().upsert(
+                    profile.copy(age = match.groupValues[1].toIntOrNull() ?: profile.age)
+                )
             }
         }
 
-        val summary = DailySummary(
-            date = targetDate,
-            summary = summaryText,
-            keyEvents = keyEvents.joinToString(",")
+        // Location
+        val locationPattern = Regex("""(?:i live in|i'm from|im from|based in|i stay in)\s+([A-Za-z\s]{2,30})""")
+        locationPattern.find(msg)?.let { match ->
+            db.userProfileDao().get()?.let { profile ->
+                db.userProfileDao().upsert(
+                    profile.copy(location = match.groupValues[1].trim())
+                )
+            }
+        }
+    }
+
+    private fun updateProfileAsync(key: String, value: String) {
+        // Fire-and-forget via coroutine scope - handled by caller
+        Log.d(TAG, "Profile update queued: $key = $value")
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // MEMORY MANAGEMENT
+    // ────────────────────────────────────────────────────────────
+
+    /**
+     * Prune low-importance, old memories to keep the DB clean.
+     * Run periodically (e.g., weekly).
+     */
+    suspend fun pruneMemories() {
+        val cutoff = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(90) // 90 days
+        val deleted = db.memoryDao().deleteOldLowImportance(cutoff, maxImportance = 3)
+        Log.d(TAG, "Pruned $deleted old memories")
+    }
+
+    /**
+     * Get memory stats for debug/settings screen.
+     */
+    suspend fun getStats(): MemoryStats {
+        val totalMemories = db.memoryDao().count()
+        val totalFacts = db.userFactDao().count()
+        val totalSummaries = db.dailySummaryDao().count()
+        val byCategory = db.memoryDao().getCountByCategory()
+        return MemoryStats(
+            totalMemories = totalMemories,
+            totalFacts = totalFacts,
+            totalSummaries = totalSummaries,
+            byCategory = byCategory
         )
-
-        db.dailySummaryDao().upsert(summary)
-        Log.d(TAG, "Generated summary for $targetDate: $summaryText")
-        return summary
     }
 
-    // ────────────────────────────────────────────────────────────
-    // MEMORY DECAY
-    // ────────────────────────────────────────────────────────────
-
-    /**
-     * Run memory decay: reduce importance of stale memories, delete dead ones.
-     * Should be called weekly (via WorkManager or on app open).
-     */
-    suspend fun runDecay() {
-        val oneWeekAgo = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(7)
-        db.memoryDao().decayUnaccessed(oneWeekAgo)
-        val deleted = db.memoryDao().deleteDecayed()
-        Log.d(TAG, "Memory decay complete. Deleted $deleted dead memories.")
-    }
-
-    // ────────────────────────────────────────────────────────────
-    // CONVERSATION STORAGE
-    // ────────────────────────────────────────────────────────────
-
-    /**
-     * Store a conversation exchange in the database.
-     */
-    suspend fun storeConversation(userMessage: String, novaResponse: String) {
-        db.conversationDao().insert(
-            Conversation(
-                userMessage = userMessage,
-                novaResponse = novaResponse
-            )
-        )
-    }
-
-    // ────────────────────────────────────────────────────────────
-    // FULL POST-RESPONSE PIPELINE
-    // ────────────────────────────────────────────────────────────
-
-    /**
-     * Call this after every Nova response.
-     * Stores conversation, extracts memories, flushes profile updates.
-     */
-    suspend fun processConversation(userMessage: String, novaResponse: String) {
-        storeConversation(userMessage, novaResponse)
-        extractMemories(userMessage, novaResponse)
-        flushProfileUpdates()
-    }
+    data class MemoryStats(
+        val totalMemories: Int,
+        val totalFacts: Int,
+        val totalSummaries: Int,
+        val byCategory: Map<String, Int>
+    )
 }

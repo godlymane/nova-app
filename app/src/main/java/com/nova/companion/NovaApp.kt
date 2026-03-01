@@ -1,24 +1,18 @@
 package com.nova.companion
 
 import android.app.Application
-import android.util.Log
-import com.nova.companion.data.NovaDatabase
-import com.nova.companion.notification.NotificationScheduler
-import com.nova.companion.notification.NovaNotificationHelper
+import androidx.work.Configuration
+import com.nova.companion.proactive.ProactiveNotificationHelper
 
-class NovaApp : Application() {
+class NovaApp : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i("NovaApp", "Nova companion initialized")
-
-        // Initialize database (lazy singleton, first access creates it)
-        NovaDatabase.getInstance(this)
-
-        // Create notification channel
-        NovaNotificationHelper.createNotificationChannel(this)
-
-        // Schedule all notification workers
-        NotificationScheduler.scheduleAll(this)
+        ProactiveNotificationHelper.ensureChannel(this)
     }
+
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder()
+            .setMinimumLoggingLevel(android.util.Log.DEBUG)
+            .build()
 }

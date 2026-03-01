@@ -1,199 +1,309 @@
 package com.nova.companion
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
-import com.nova.companion.accessibility.AccessibilityPermissionHelper
-import com.nova.companion.brain.context.ContextEngine
-import com.nova.companion.notification.NovaNotificationPrefs
-import com.nova.companion.overlay.AuraOverlayService
-import com.nova.companion.tools.ToolPermissionHelper
-import com.nova.companion.ui.navigation.NovaNavigation
-import com.nova.companion.ui.theme.NovaTheme
-import com.nova.companion.voice.WakeWordService
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.nova.companion.overlay.bubble.TaskBubbleService
+import com.nova.companion.ui.chat.ChatMessage
+import com.nova.companion.ui.chat.ChatViewModel
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
-    companion object {
-        private const val TAG = "NovaMain"
-    }
-
-    private var showAccessibilityBanner by mutableStateOf(false)
-
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted: Boolean ->
-        Log.d(TAG, "Permission result: granted=$isGranted")
-    }
-
-    private val requestMultiplePermissionsLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        permissions.forEach { (permission, granted) ->
-            Log.d(TAG, "Tool permission $permission: granted=$granted")
+    private val overlayPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        // Permission result — start bubble service if granted
+        if (Settings.canDrawOverlays(this)) {
+            TaskBubbleService.start(this)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
 
-        NovaNotificationPrefs(this).recordAppOpen()
-        requestMicrophonePermission()
-        requestNotificationPermission()
-        requestToolPermissions()
-        requestBrainPermissions()
-        checkAccessibilityService()
-        requestOverlayPermission()
-
-        WakeWordService.start(this)
-
-        setContent {
-            NovaTheme {
-                NovaNavigation()
-            }
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        NovaNotificationPrefs(this).recordAppOpen()
-        checkAccessibilityService()
-        // Start overlay if permission granted
-        if (Settings.canDrawOverlays(this)) {
-            AuraOverlayService.start(this)
-        }
-    }
-
-    private fun requestOverlayPermission() {
+        // Request overlay permission if not granted
         if (!Settings.canDrawOverlays(this)) {
-            Log.i(TAG, "Requesting SYSTEM_ALERT_WINDOW permission")
             val intent = Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:$packageName")
             )
-            startActivity(intent)
+            overlayPermissionLauncher.launch(intent)
         } else {
-            // Start the overlay service
-            AuraOverlayService.start(this)
+            TaskBubbleService.start(this)
         }
-    }
 
-    private fun requestMicrophonePermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            Log.i(TAG, "Requesting RECORD_AUDIO permission")
-            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        } else {
-            Log.d(TAG, "RECORD_AUDIO already granted")
-        }
-    }
-
-    private fun requestNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                Log.i(TAG, "Requesting POST_NOTIFICATIONS permission")
-                requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            } else {
-                Log.d(TAG, "POST_NOTIFICATIONS already granted")
+        setContent {
+            NovaTheme {
+                val viewModel: ChatViewModel = viewModel()
+                NovaApp(viewModel)
             }
         }
     }
 
-    private fun requestToolPermissions() {
-        val missing = ToolPermissionHelper.getMissingPermissions(this)
-        if (missing.isNotEmpty()) {
-            Log.i(TAG, "Requesting ${missing.size} tool permissions: $missing")
-            requestMultiplePermissionsLauncher.launch(missing.toTypedArray())
-        } else {
-            Log.d(TAG, "All tool permissions already granted")
+    override fun onDestroy() {
+        super.onDestroy()
+        // Don't stop bubble service here — it's persistent
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+// THEME
+// ────────────────────────────────────────────────────────────
+
+@Composable
+fun NovaTheme(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = darkColorScheme(
+            background = Color(0xFF0A0A0A),
+            surface = Color(0xFF141414),
+            primary = Color(0xFF00FF88),
+            onBackground = Color.White,
+            onSurface = Color.White
+        )
+    ) {
+        content()
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+// MAIN APP UI
+// ────────────────────────────────────────────────────────────
+
+@Composable
+fun NovaApp(viewModel: ChatViewModel) {
+    val messages by viewModel.messages.collectAsState()
+    val isLoading by viewModel.isLoading.collectAsState()
+    val error by viewModel.error.collectAsState()
+
+    var inputText by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+
+    // Auto-scroll to bottom on new messages
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
         }
     }
 
-    private fun checkAccessibilityService() {
-        showAccessibilityBanner = !AccessibilityPermissionHelper.isAccessibilityServiceEnabled(this)
-        if (showAccessibilityBanner) {
-            Log.i(TAG, "Accessibility service not enabled — showing banner")
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0A0A0A))
+            .systemBarsPadding()
+    ) {
+        // Header
+        NovaHeader()
+
+        // Messages
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(vertical = 16.dp)
+        ) {
+            items(messages) { message ->
+                MessageBubble(message)
+            }
+            if (isLoading) {
+                item { TypingIndicator() }
+            }
         }
-    }
 
-    private fun requestBrainPermissions() {
-        val permissionsNeeded = ToolPermissionHelper.BRAIN_PERMISSIONS.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }.toTypedArray()
-
-        if (permissionsNeeded.isEmpty()) {
-            // All already granted
-            startContextEngine()
-        } else {
-            Log.d(TAG, "Requesting brain permissions: ${permissionsNeeded.joinToString()}")
-            requestMultiplePermissionsLauncher.launch(permissionsNeeded)
-            // Start ContextEngine regardless — it degrades gracefully
-            startContextEngine()
+        // Error
+        error?.let { err ->
+            Text(
+                text = err,
+                color = Color.Red,
+                modifier = Modifier.padding(horizontal = 16.dp),
+                fontSize = 12.sp
+            )
         }
-    }
 
-    private fun startContextEngine() {
-        try {
-            ContextEngine.start(this)
-            Log.i(TAG, "ContextEngine started")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start ContextEngine", e)
+        // Input
+        NovaInputBar(
+            value = inputText,
+            onValueChange = { inputText = it },
+            onSend = {
+                viewModel.sendMessage(inputText)
+                inputText = ""
+                scope.launch { listState.animateScrollToItem(messages.size) }
+            },
+            isLoading = isLoading
+        )
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+// COMPONENTS
+// ────────────────────────────────────────────────────────────
+
+@Composable
+fun NovaHeader() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF141414))
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "NOVA",
+            color = Color(0xFF00FF88),
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Black,
+            letterSpacing = 4.sp
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        Text(
+            text = "● online",
+            color = Color(0xFF00FF88),
+            fontSize = 11.sp
+        )
+    }
+}
+
+@Composable
+fun MessageBubble(message: ChatMessage) {
+    val isUser = message.role == "user"
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+    ) {
+        if (!isUser) {
+            // Nova indicator
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .background(Color(0xFF00FF88), shape = RoundedCornerShape(50))
+                    .align(Alignment.Bottom),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("N", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+
+        Surface(
+            shape = RoundedCornerShape(
+                topStart = if (isUser) 18.dp else 4.dp,
+                topEnd = 18.dp,
+                bottomStart = 18.dp,
+                bottomEnd = if (isUser) 4.dp else 18.dp
+            ),
+            color = if (isUser) Color(0xFF1A1A2E) else Color(0xFF1E1E1E),
+            modifier = Modifier.widthIn(max = 280.dp)
+        ) {
+            Text(
+                text = message.content,
+                color = Color.White,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                fontSize = 15.sp,
+                lineHeight = 22.sp
+            )
+        }
+
+        if (isUser) Spacer(modifier = Modifier.width(8.dp))
+    }
+}
+
+@Composable
+fun TypingIndicator() {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(start = 36.dp)
+    ) {
+        repeat(3) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .background(Color(0xFF00FF88), shape = RoundedCornerShape(50))
+            )
+            if (it < 2) Spacer(modifier = Modifier.width(4.dp))
         }
     }
 }
 
 @Composable
-fun AccessibilityPermissionBanner(onOpenSettings: () -> Unit) {
-    val context = LocalContext.current
-    if (!AccessibilityPermissionHelper.isAccessibilityServiceEnabled(context)) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+fun NovaInputBar(
+    value: String,
+    onValueChange: (String) -> Unit,
+    onSend: () -> Unit,
+    isLoading: Boolean
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF141414))
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .navigationBarsPadding(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.weight(1f),
+            placeholder = {
+                Text("Message Nova...", color = Color.Gray, fontSize = 14.sp)
+            },
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                focusedBorderColor = Color(0xFF00FF88),
+                unfocusedBorderColor = Color(0xFF333333),
+                cursorColor = Color(0xFF00FF88)
+            ),
+            shape = RoundedCornerShape(24.dp),
+            maxLines = 4,
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                imeAction = androidx.compose.ui.text.input.ImeAction.Send
+            ),
+            keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                onSend = { if (!isLoading) onSend() }
+            )
+        )
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        Button(
+            onClick = { if (!isLoading) onSend() },
+            enabled = !isLoading && value.isNotBlank(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFF00FF88),
+                disabledContainerColor = Color(0xFF333333)
+            ),
+            shape = RoundedCornerShape(50),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    "Enable Full Control",
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Text(
-                    "Let Nova interact with apps on your behalf — tap buttons, fill forms, send messages automatically.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-                Button(
-                    onClick = onOpenSettings,
-                    modifier = Modifier.padding(top = 8.dp)
-                ) {
-                    Text("Enable in Settings")
-                }
-            }
+            Text(
+                text = if (isLoading) "..." else "→",
+                color = Color.Black,
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp
+            )
         }
     }
 }
