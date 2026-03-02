@@ -93,6 +93,10 @@ object SmartRouter {
     }
 
     private fun containsAny(text: String, keywords: Set<String>): Boolean {
-        return keywords.any { keyword -> text.contains(keyword) }
+        return keywords.any { keyword ->
+            // Word boundary matching to prevent substring false positives
+            val pattern = "\\b${Regex.escape(keyword)}\\b"
+            Regex(pattern).containsMatchIn(text)
+        }
     }
 }

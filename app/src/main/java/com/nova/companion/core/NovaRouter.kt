@@ -33,7 +33,8 @@ enum class NovaMode {
     VOICE_ELEVEN,   // ElevenLabs Conversational AI WebSocket
     VOICE_LOCAL,    // Whisper STT + local GGUF + Piper TTS
     AUTOMATION,     // Cloud LLM + tool execution for device actions
-    TEXT_CLOUD      // Cloud LLM (GPT-4o) for complex queries
+    TEXT_CLOUD,     // Cloud LLM (GPT-4o) for complex queries
+    LIVE_DATA       // Cloud LLM + web search tool (weather, news, prices)
 }
 
 object NovaRouter {
@@ -85,14 +86,34 @@ object NovaRouter {
         "song", "spotify", "youtube music", "stop", "resume"
     )
 
-    // Search
+    // Search (only clear search-intent phrases, not knowledge questions)
     private val AUTOMATION_SEARCH_KEYWORDS = setOf(
-        "search", "google", "look up", "find", "who is", "what is"
+        "search", "google", "look up"
     )
 
-    // Calling (future implementation)
+    // Calling
     private val AUTOMATION_CALL_KEYWORDS = setOf(
         "call", "dial", "phone", "ring"
+    )
+
+    // App-specific keywords — always route to AUTOMATION (these are unambiguous)
+    private val AUTOMATION_APP_SPECIFIC_KEYWORDS = setOf(
+        "swiggy", "zomato", "uber", "ola", "rapido",
+        "gpay", "phonepe", "paytm", "upi",
+        "flashlight", "torch", "screenshot", "selfie"
+    )
+
+    // Action verbs that need a context object to trigger AUTOMATION
+    private val AUTOMATION_ACTION_VERBS = setOf(
+        "order", "book", "post", "upload", "share", "download",
+        "translate", "record", "pay"
+    )
+
+    // Context-sensitive keywords — only trigger AUTOMATION when preceded by an action verb
+    private val AUTOMATION_CONTEXT_KEYWORDS = setOf(
+        "instagram", "insta", "tiktok", "twitter", "snapchat",
+        "reel", "story", "tweet", "snap",
+        "photo", "camera", "note", "email", "mail"
     )
 
     // ── Routing Logic ────────────────────────────────────────────
@@ -122,8 +143,8 @@ object NovaRouter {
         val smartRoute = SmartRouter.route(lower)
         when (smartRoute) {
             SmartRouter.RouteType.LIVE_DATA -> {
-                Log.d(TAG, "Route: TEXT_CLOUD via SmartRouter (LIVE_DATA) for: ${message.take(50)}...")
-                return NovaMode.TEXT_CLOUD
+                Log.d(TAG, "Route: LIVE_DATA via SmartRouter for: ${message.take(50)}...")
+                return NovaMode.LIVE_DATA
             }
             SmartRouter.RouteType.COMPLEX -> {
                 Log.d(TAG, "Route: TEXT_CLOUD via SmartRouter (COMPLEX) for: ${message.take(50)}...")
@@ -181,9 +202,7 @@ object NovaRouter {
 
         // Check for alarm/timer/reminder patterns
         if (containsAnyWord(message, AUTOMATION_ALARM_KEYWORDS)) {
-            return message.contains("set") || message.contains("remind") ||
-                    message.contains("alarm") || message.contains("timer") ||
-                    message.contains("wake") || message.contains("sleep")
+            return containsAnyWord(message, setOf("set", "remind", "alarm", "timer", "wake", "sleep"))
         }
 
         // Check for settings control patterns (turn on/off, enable/disable)
@@ -216,9 +235,27 @@ object NovaRouter {
                     message.startsWith("look up") || message.contains("search for")
         }
 
-        // Check for calling patterns (future)
+        // Check for calling patterns
         if (containsAnyWord(message, AUTOMATION_CALL_KEYWORDS)) {
             return message.startsWith("call") || message.startsWith("dial")
+        }
+
+        // App-specific keywords — always automation (swiggy, gpay, flashlight, etc.)
+        if (containsAnyWord(message, AUTOMATION_APP_SPECIFIC_KEYWORDS)) {
+            return true
+        }
+
+        // Action verb at start of message → automation (order food, post reel, etc.)
+        if (AUTOMATION_ACTION_VERBS.any { message.startsWith(it) }) {
+            return true
+        }
+
+        // Context-sensitive: need both an action verb AND a context keyword
+        // e.g. "take a photo" ✓, "post a reel" ✓, but "what is a reel" ✗
+        if (containsAnyWord(message, AUTOMATION_CONTEXT_KEYWORDS) &&
+            containsAnyWord(message, AUTOMATION_ACTION_VERBS + setOf("take", "open", "send", "create", "make", "write"))
+        ) {
+            return true
         }
 
         return false
@@ -311,6 +348,7 @@ object NovaRouter {
             NovaMode.VOICE_LOCAL -> "Voice Mode (On-Device)"
             NovaMode.AUTOMATION -> "Automation (Device Actions)"
             NovaMode.TEXT_CLOUD -> "Cloud Chat (Analysis & Coding)"
+            NovaMode.LIVE_DATA -> "Live Data (Web Search)"
         }
     }
 
@@ -320,7 +358,12 @@ object NovaRouter {
      * Check if message contains any of the given keywords.
      */
     private fun containsAnyWord(text: String, keywords: Set<String>): Boolean {
-        return keywords.any { keyword -> text.contains(keyword) }
+        return keywords.any { keyword ->
+            // Use word boundary matching to avoid substring false positives
+            // e.g. "play" should not match "display", "set" should not match "sunset"
+            val pattern = "\\b${Regex.escape(keyword)}\\b"
+            Regex(pattern).containsMatchIn(text)
+        }
     }
 
     /**

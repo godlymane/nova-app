@@ -16,6 +16,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -30,7 +31,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -47,20 +47,14 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -87,11 +81,8 @@ import com.nova.companion.core.NovaMode
 import com.nova.companion.inference.NovaInference.ModelState
 import com.nova.companion.ui.aura.AuraState
 import com.nova.companion.ui.aura.NovaAuraEffect
-import com.nova.companion.ui.theme.NovaDarkGray
 import com.nova.companion.ui.theme.NovaBlack
-import com.nova.companion.ui.theme.NovaBlue
-import com.nova.companion.ui.theme.NovaGreen
-import com.nova.companion.ui.theme.NovaOrange
+import com.nova.companion.ui.theme.NovaDarkGray
 import com.nova.companion.ui.theme.NovaPurpleAmbient
 import com.nova.companion.ui.theme.NovaPurpleCore
 import com.nova.companion.ui.theme.NovaPurpleDeep
@@ -103,37 +94,41 @@ import com.nova.companion.ui.theme.NovaTextDim
 import com.nova.companion.ui.theme.NovaTextSecondary
 import com.nova.companion.voice.ElevenLabsVoiceService
 
+// ─── Private color constants ──────────────────────────────────────────────────
+private val UserBubbleStart  = Color(0xFF6C2BD9)
+private val UserBubbleEnd    = Color(0xFF9B59F5)
+private val NovaBubbleBg     = Color(0xFF111111)
+private val NovaBubbleBorder = Color(0xFF2A2A2A)
+private val ToolBarBg        = Color(0xFF0D0D0D)
+private val InputBg          = Color(0xFF161616)
+
 // ─────────────────────────────────────────────────────────────────────────────
-// ChatScreen root
+// Root
 // ─────────────────────────────────────────────────────────────────────────────
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel,
     onNavigateToSettings: () -> Unit
 ) {
-    val messages by viewModel.messages.collectAsState()
-    val streamingText by viewModel.streamingText.collectAsState()
-    val isGenerating by viewModel.isGenerating.collectAsState()
-    val modelState by viewModel.modelState.collectAsState()
-    val loadProgress by viewModel.loadProgress.collectAsState()
-    val currentMode by viewModel.currentMode.collectAsState()
-    val isVoiceActive by viewModel.isVoiceActive.collectAsState()
-    val elevenLabsState by viewModel.elevenLabsConnectionState.collectAsState()
-    val isElevenLabsSpeaking by viewModel.isElevenLabsSpeaking.collectAsState()
-    val auraState by viewModel.auraState.collectAsState()
+    val messages         by viewModel.messages.collectAsState()
+    val streamingText    by viewModel.streamingText.collectAsState()
+    val isGenerating     by viewModel.isGenerating.collectAsState()
+    val modelState       by viewModel.modelState.collectAsState()
+    val currentMode      by viewModel.currentMode.collectAsState()
+    val isVoiceActive    by viewModel.isVoiceActive.collectAsState()
+    val elevenLabsState  by viewModel.elevenLabsConnectionState.collectAsState()
+    val isSpeaking       by viewModel.isElevenLabsSpeaking.collectAsState()
+    val auraState        by viewModel.auraState.collectAsState()
+    val automationStatus by viewModel.automationStatus.collectAsState()
+    val isOnline         by viewModel.isOnline.collectAsState()
 
     val listState = rememberLazyListState()
 
-    // Auto-scroll when new messages arrive or streaming updates
     LaunchedEffect(messages.size, streamingText) {
         if (messages.isNotEmpty() || streamingText.isNotEmpty()) {
-            val totalItems =
-                messages.size + (if (streamingText.isNotEmpty() || isGenerating) 1 else 0)
-            if (totalItems > 0) {
-                listState.animateScrollToItem((totalItems - 1).coerceAtLeast(0))
-            }
+            val total = messages.size + if (streamingText.isNotEmpty() || isGenerating) 1 else 0
+            if (total > 0) listState.animateScrollToItem((total - 1).coerceAtLeast(0))
         }
     }
 
@@ -141,100 +136,115 @@ fun ChatScreen(
         Scaffold(
             topBar = {
                 NovaTopBar(
-                    currentMode = currentMode,
-                    onSettingsClick = onNavigateToSettings
+                    auraState  = auraState,
+                    onSettings = onNavigateToSettings
                 )
             },
             containerColor = NovaBlack
-        ) { paddingValues ->
+        ) { padding ->
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(paddingValues)
+                    .padding(padding)
                     .background(NovaBlack)
             ) {
-                // Subtle model-loading progress bar — visible only while loading
+                // Model loading progress — slim line only while loading
                 AnimatedVisibility(visible = modelState == ModelState.LOADING) {
-                    LinearProgressIndicator(
-                        progress = { loadProgress },
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(2.dp),
-                        color = NovaPurpleCore,
-                        trackColor = NovaSurface
+                            .height(1.5.dp)
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(NovaPurpleDeep, NovaPurpleCore, NovaPurpleGlow)
+                                )
+                            )
                     )
                 }
 
-                // Chat messages area — always shown regardless of model state
+                // Offline banner
+                AnimatedVisibility(visible = !isOnline) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF2A1A1A))
+                            .padding(vertical = 4.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Offline — local model only",
+                            color = Color(0xFFFF8A80),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+
+                // Messages
                 Box(modifier = Modifier.weight(1f)) {
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // Beautiful empty state
                         if (messages.isEmpty() && streamingText.isEmpty() && !isGenerating) {
-                            item(key = "empty") {
-                                NovaEmptyState(currentMode = currentMode)
-                            }
+                            item(key = "empty") { NovaEmptyState() }
                         }
 
-                        items(
-                            items = messages,
-                            key = { it.id }
-                        ) { message ->
-                            MessageBubbleAnimated(message = message)
+                        items(items = messages, key = { it.id }) { msg ->
+                            AnimatedBubble(message = msg)
                         }
 
-                        // Streaming message
                         if (streamingText.isNotEmpty()) {
-                            item(key = "streaming") {
-                                ChatBubble(
-                                    message = ChatMessage(
-                                        content = streamingText,
-                                        isUser = false,
-                                        isStreaming = true
-                                    )
+                            item(key = "stream") {
+                                NovaBubble(
+                                    text = streamingText,
+                                    isStreaming = true
                                 )
                             }
                         }
 
-                        // Typing indicator
                         if (isGenerating && streamingText.isEmpty()) {
-                            item(key = "typing") {
-                                TypingIndicator()
-                            }
+                            item(key = "typing") { TypingDots() }
                         }
                     }
                 }
 
-                // Voice mode overlay — shown above input bar when ElevenLabs is active
+                // Automation step bar — shows tool being executed
+                AnimatedVisibility(
+                    visible = automationStatus != null,
+                    enter = fadeIn() + slideInVertically { it },
+                    exit  = fadeOut()
+                ) {
+                    automationStatus?.let { tool ->
+                        ToolExecutionBar(toolName = tool)
+                    }
+                }
+
+                // Voice overlay
                 AnimatedVisibility(visible = isVoiceActive && currentMode == NovaMode.VOICE_ELEVEN) {
-                    VoiceModeOverlay(
-                        connectionState = elevenLabsState,
-                        isSpeaking = isElevenLabsSpeaking,
+                    VoiceOverlay(
+                        state     = elevenLabsState,
+                        speaking  = isSpeaking,
                         onEndCall = { viewModel.stopVoiceMode() }
                     )
                 }
 
-                // Input bar
-                ChatInputBar(
-                    isGenerating = isGenerating,
-                    currentMode = currentMode,
+                // Input
+                InputBar(
+                    isGenerating  = isGenerating,
+                    currentMode   = currentMode,
                     isVoiceActive = isVoiceActive,
-                    onSend = { viewModel.sendMessage(it) },
-                    onCancel = { viewModel.cancelGeneration() },
-                    onVoiceToggle = { viewModel.toggleVoiceMode() }
+                    onSend        = { viewModel.sendMessage(it) },
+                    onCancel      = { viewModel.cancelGeneration() },
+                    onVoiceTap    = { viewModel.toggleVoiceMode() }
                 )
             }
         }
 
-        // Aura overlay — sits on top of everything as a full-screen overlay
-        NovaAuraEffect(
-            auraState = auraState,
-            modifier = Modifier.fillMaxSize()
-        )
+        // Aura overlay — sits above everything
+        NovaAuraEffect(auraState = auraState, modifier = Modifier.fillMaxSize())
     }
 }
 
@@ -242,60 +252,80 @@ fun ChatScreen(
 // Top bar
 // ─────────────────────────────────────────────────────────────────────────────
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NovaTopBar(
-    currentMode: NovaMode,
-    onSettingsClick: () -> Unit
+    auraState: AuraState,
+    onSettings: () -> Unit
 ) {
-    TopAppBar(
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "Nova",
-                    style = MaterialTheme.typography.titleLarge.copy(
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 22.sp
-                    ),
-                    color = Color.White
-                )
-                Spacer(modifier = Modifier.width(10.dp))
+    val infiniteTransition = rememberInfiniteTransition(label = "dotPulse")
+    val dotAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.5f,
+        targetValue  = 1f,
+        animationSpec = infiniteRepeatable(
+            animation  = tween(900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "dotAlpha"
+    )
 
-                // Mode badge — always visible to reflect routing state
-                val (badgeText, badgeColor) = when (currentMode) {
-                    NovaMode.TEXT_LOCAL -> "Local" to NovaGreen
-                    NovaMode.TEXT_CLOUD -> "Cloud" to NovaBlue
-                    NovaMode.VOICE_ELEVEN -> "Voice" to NovaPurpleCore
-                    NovaMode.VOICE_LOCAL -> "Voice" to NovaGreen
-                    NovaMode.AUTOMATION -> "Auto" to NovaOrange
-                }
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = badgeColor.copy(alpha = 0.15f)
-                ) {
-                    Text(
-                        text = badgeText,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = badgeColor,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
-        },
-        actions = {
-            IconButton(onClick = onSettingsClick) {
-                Icon(
-                    imageVector = Icons.Default.Settings,
-                    contentDescription = "Settings",
-                    tint = NovaTextSecondary
+    val dotColor = when (auraState) {
+        AuraState.SURGE  -> NovaPurpleGlow
+        AuraState.ACTIVE -> NovaPurpleCore
+        AuraState.DORMANT -> NovaPurpleCore.copy(alpha = 0.35f)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NovaBlack)
+            .padding(horizontal = 20.dp, vertical = 14.dp)
+    ) {
+        // Nova + status dot
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.align(Alignment.CenterStart)
+        ) {
+            Text(
+                text  = "Nova",
+                color = Color.White,
+                style = MaterialTheme.typography.titleLarge.copy(
+                    fontWeight   = FontWeight.Bold,
+                    fontSize     = 22.sp,
+                    letterSpacing = (-0.5).sp
                 )
-            }
-        },
-        colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = NovaBlack,
-            titleContentColor = Color.White
-        )
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            // Live pulse dot
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .background(
+                        dotColor.copy(alpha = if (auraState != AuraState.DORMANT) dotAlpha else 0.35f),
+                        CircleShape
+                    )
+            )
+        }
+
+        // Settings button
+        IconButton(
+            onClick   = onSettings,
+            modifier  = Modifier.align(Alignment.CenterEnd).size(38.dp)
+        ) {
+            Icon(
+                imageVector       = Icons.Default.Settings,
+                contentDescription = "Settings",
+                tint              = NovaTextDim,
+                modifier          = Modifier.size(20.dp)
+            )
+        }
+    }
+
+    // Hairline divider
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(0.5.dp)
+            .background(NovaBubbleBorder)
     )
 }
 
@@ -303,98 +333,78 @@ private fun NovaTopBar(
 // Empty state
 // ─────────────────────────────────────────────────────────────────────────────
 
-private val suggestionChips = listOf(
-    "Tell me a joke",
-    "Play some music",
-    "What's the weather like?",
-    "Help me focus"
+private val suggestions = listOf(
+    "Order from Swiggy",
+    "Open Spotify",
+    "Set a timer",
+    "Hey, what's good"
 )
 
 @Composable
-private fun NovaEmptyState(currentMode: NovaMode) {
-    // Breathing animation for subtitle
-    val breathTransition = rememberInfiniteTransition(label = "breathe")
-    val subtitleAlpha by breathTransition.animateFloat(
-        initialValue = 0.45f,
-        targetValue = 0.85f,
+private fun NovaEmptyState() {
+    val pulse = rememberInfiniteTransition(label = "emptyPulse")
+    val alpha by pulse.animateFloat(
+        initialValue  = 0.5f,
+        targetValue   = 0.9f,
         animationSpec = infiniteRepeatable(
-            animation = tween(2200, easing = LinearEasing),
+            animation  = tween(2400, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "subtitleAlpha"
-    )
-    val subtitleScale by breathTransition.animateFloat(
-        initialValue = 0.98f,
-        targetValue = 1.02f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2200, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "subtitleScale"
+        label = "emptyAlpha"
     )
 
     Column(
-        modifier = Modifier
+        modifier             = Modifier
             .fillMaxWidth()
-            .padding(top = 96.dp, start = 24.dp, end = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .padding(top = 80.dp, start = 24.dp, end = 24.dp),
+        horizontalAlignment  = Alignment.CenterHorizontally
     ) {
-        // Large Nova title
+        // Big pulsing Nova wordmark
         Text(
-            text = "Nova",
+            text  = "Nova",
             style = MaterialTheme.typography.headlineLarge.copy(
-                fontWeight = FontWeight.Bold,
-                fontSize = 52.sp,
-                letterSpacing = (-1).sp
+                fontWeight    = FontWeight.Bold,
+                fontSize      = 58.sp,
+                letterSpacing = (-2).sp
             ),
-            color = NovaPurpleCore
+            color = NovaPurpleCore.copy(alpha = alpha)
         )
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // Breathing subtitle
         Text(
-            text = "What's on your mind?",
-            style = MaterialTheme.typography.bodyLarge.copy(
-                fontSize = 17.sp
-            ),
-            color = NovaTextSecondary.copy(alpha = subtitleAlpha),
-            textAlign = TextAlign.Center,
-            modifier = Modifier.scale(subtitleScale)
+            text  = "what do you need",
+            color = NovaTextDim,
+            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp),
+            textAlign = TextAlign.Center
         )
 
-        Spacer(modifier = Modifier.height(40.dp))
+        Spacer(modifier = Modifier.height(48.dp))
 
         // Suggestion chips
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            suggestionChips.chunked(2).forEach { row ->
+            suggestions.chunked(2).forEach { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     row.forEach { chip ->
-                        SuggestionChip(label = chip)
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = NovaSurfaceVariant.copy(alpha = 0.5f)
+                        ) {
+                            Text(
+                                text     = chip,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                style    = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
+                                color    = NovaTextSecondary,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun SuggestionChip(label: String) {
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = NovaSurfaceVariant.copy(alpha = 0.6f),
-        modifier = Modifier
-    ) {
-        Text(
-            text = label,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
-            style = MaterialTheme.typography.bodyMedium,
-            color = NovaTextSecondary,
-            fontWeight = FontWeight.Medium
-        )
     }
 }
 
@@ -403,86 +413,132 @@ private fun SuggestionChip(label: String) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun MessageBubbleAnimated(message: ChatMessage) {
+private fun AnimatedBubble(message: ChatMessage) {
     var visible by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { visible = true }
 
     AnimatedVisibility(
         visible = visible,
-        enter = slideInVertically(
-            initialOffsetY = { it / 3 },
-            animationSpec = tween(300, easing = FastOutSlowInEasing)
-        ) + fadeIn(animationSpec = tween(300))
+        enter   = slideInVertically(
+            initialOffsetY = { it / 4 },
+            animationSpec  = tween(280, easing = FastOutSlowInEasing)
+        ) + fadeIn(animationSpec = tween(220))
     ) {
-        ChatBubble(message = message)
+        if (message.isUser) {
+            UserBubble(text = message.content)
+        } else {
+            NovaBubble(text = message.content, isStreaming = message.isStreaming)
+        }
     }
 }
 
 @Composable
-private fun ChatBubble(
-    message: ChatMessage,
-    modifier: Modifier = Modifier
-) {
+private fun UserBubble(text: String) {
     val context = LocalContext.current
-    val isUser = message.isUser
-
-    // Route tag badge color
-    val routeColor: Color? = when (message.routeTag) {
-        "cloud" -> NovaBlue.copy(alpha = 0.7f)
-        "local" -> NovaGreen.copy(alpha = 0.7f)
-        "voice" -> NovaPurpleCore.copy(alpha = 0.7f)
-        else -> null
-    }
-
     Row(
-        modifier = modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+        modifier            = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.End
     ) {
-        Column(
-            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+        Box(
+            modifier = Modifier
+                .widthIn(max = 290.dp)
+                .clip(
+                    RoundedCornerShape(
+                        topStart    = 20.dp,
+                        topEnd      = 20.dp,
+                        bottomStart = 20.dp,
+                        bottomEnd   = 5.dp
+                    )
+                )
+                .background(
+                    Brush.linearGradient(
+                        colors = listOf(UserBubbleStart, UserBubbleEnd)
+                    )
+                )
+                .pointerInput(Unit) {
+                    detectTapGestures(onLongPress = { copyToClipboard(context, text) })
+                }
+                .padding(horizontal = 16.dp, vertical = 11.dp)
         ) {
-            Surface(
-                shape = RoundedCornerShape(
-                    topStart = 18.dp,
-                    topEnd = 18.dp,
-                    bottomStart = if (isUser) 18.dp else 4.dp,
-                    bottomEnd = if (isUser) 4.dp else 18.dp
-                ),
-                color = if (isUser) NovaBlue else NovaDarkGray,
-                modifier = Modifier
-                    .widthIn(max = 300.dp)
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onLongPress = {
-                                val clipboard =
-                                    context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clipboard.setPrimaryClip(
-                                    ClipData.newPlainText("message", message.content)
-                                )
-                                Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
-                            }
-                        )
-                    }
-            ) {
-                Text(
-                    text = if (message.isStreaming) "${message.content}\u2588" else message.content,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 22.sp)
+            Text(
+                text  = text,
+                color = Color.White,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize   = 15.sp,
+                    lineHeight = 22.sp
                 )
-            }
-
-            // Small route tag badge
-            if (routeColor != null && message.routeTag != null) {
-                Text(
-                    text = message.routeTag,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = routeColor,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                )
-            }
+            )
         }
     }
+}
+
+@Composable
+private fun NovaBubble(text: String, isStreaming: Boolean = false) {
+    val context = LocalContext.current
+    Row(
+        modifier          = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.Start
+    ) {
+        // Nova avatar dot
+        Box(
+            modifier = Modifier
+                .padding(bottom = 2.dp, end = 8.dp)
+                .size(26.dp)
+                .background(NovaPurpleDeep, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text  = "N",
+                color = NovaPurpleGlow,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    fontSize   = 11.sp
+                )
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .widthIn(max = 290.dp)
+                .clip(
+                    RoundedCornerShape(
+                        topStart    = 20.dp,
+                        topEnd      = 20.dp,
+                        bottomStart = 5.dp,
+                        bottomEnd   = 20.dp
+                    )
+                )
+                .background(NovaBubbleBg)
+                // Subtle border
+                .then(
+                    Modifier.background(
+                        Brush.linearGradient(
+                            listOf(NovaBubbleBorder.copy(alpha = 0f), NovaBubbleBorder)
+                        )
+                    )
+                )
+                .pointerInput(Unit) {
+                    detectTapGestures(onLongPress = { copyToClipboard(context, text) })
+                }
+                .padding(horizontal = 16.dp, vertical = 11.dp)
+        ) {
+            Text(
+                text  = if (isStreaming) "$text\u2588" else text,
+                color = Color(0xFFE8E8E8),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize   = 15.sp,
+                    lineHeight = 22.sp
+                )
+            )
+        }
+    }
+}
+
+private fun copyToClipboard(context: Context, text: String) {
+    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    cm.setPrimaryClip(ClipData.newPlainText("message", text))
+    Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -490,38 +546,36 @@ private fun ChatBubble(
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun TypingIndicator() {
-    val infiniteTransition = rememberInfiniteTransition(label = "typing")
-
+private fun TypingDots() {
+    val transition = rememberInfiniteTransition(label = "dots")
     Row(
-        modifier = Modifier.padding(start = 4.dp, top = 4.dp, bottom = 4.dp),
+        modifier          = Modifier.padding(start = 34.dp, top = 4.dp, bottom = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        repeat(3) { index ->
-            val delay = index * 160
-            val alpha by infiniteTransition.animateFloat(
-                initialValue = 0.25f,
-                targetValue = 1f,
+        repeat(3) { i ->
+            val alpha by transition.animateFloat(
+                initialValue = 0.2f,
+                targetValue  = 1f,
                 animationSpec = infiniteRepeatable(
-                    animation = tween(500, delayMillis = delay),
+                    animation  = tween(500, delayMillis = i * 150),
                     repeatMode = RepeatMode.Reverse
                 ),
-                label = "dot_alpha_$index"
+                label = "dot$i"
             )
-            val offsetY by infiniteTransition.animateFloat(
+            val offsetY by transition.animateFloat(
                 initialValue = 0f,
-                targetValue = -5f,
+                targetValue  = -4f,
                 animationSpec = infiniteRepeatable(
-                    animation = tween(500, delayMillis = delay),
+                    animation  = tween(500, delayMillis = i * 150),
                     repeatMode = RepeatMode.Reverse
                 ),
-                label = "dot_bounce_$index"
+                label = "bounce$i"
             )
             Box(
                 modifier = Modifier
-                    .offset(y = offsetY.dp)
-                    .size(8.dp)
+                    .padding(top = offsetY.dp.coerceAtLeast(0.dp))
+                    .size(7.dp)
                     .clip(CircleShape)
                     .background(NovaPurpleCore.copy(alpha = alpha))
             )
@@ -530,181 +584,244 @@ private fun TypingIndicator() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Automation tool execution bar
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun ToolExecutionBar(toolName: String) {
+    val pulse = rememberInfiniteTransition(label = "toolPulse")
+    val dotScale by pulse.animateFloat(
+        initialValue = 0.7f,
+        targetValue  = 1.3f,
+        animationSpec = infiniteRepeatable(
+            animation  = tween(600, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "toolDot"
+    )
+
+    // Human-readable tool name
+    val label = when (toolName) {
+        "readScreen"      -> "Reading screen"
+        "tapOnScreen"     -> "Tapping"
+        "typeText"        -> "Typing"
+        "scrollScreen"    -> "Scrolling"
+        "pressBack"       -> "Going back"
+        "navigateApp"     -> "Opening app"
+        "waitForElement"  -> "Waiting for element"
+        "sendWhatsApp",
+        "sendWhatsAppFull" -> "Sending message"
+        "openApp"         -> "Opening app"
+        "playSpotify"     -> "Opening Spotify"
+        "playYouTube"     -> "Opening YouTube"
+        "orderFood"       -> "Opening food app"
+        "bookRide"        -> "Opening ride app"
+        "getWeather"      -> "Fetching weather"
+        "getDirections"   -> "Getting directions"
+        "sendEmail"       -> "Composing email"
+        else              -> toolName.replaceFirstChar { it.uppercase() }
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(ToolBarBg)
+            .padding(horizontal = 20.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .scale(dotScale)
+                .size(8.dp)
+                .background(NovaPurpleCore, CircleShape)
+        )
+        Text(
+            text  = label,
+            color = NovaPurpleGlow,
+            style = MaterialTheme.typography.labelMedium.copy(
+                fontSize     = 12.sp,
+                letterSpacing = 0.5.sp
+            )
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Input bar
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun ChatInputBar(
-    isGenerating: Boolean,
-    currentMode: NovaMode,
+private fun InputBar(
+    isGenerating:  Boolean,
+    currentMode:   NovaMode,
     isVoiceActive: Boolean,
-    onSend: (String) -> Unit,
-    onCancel: () -> Unit,
-    onVoiceToggle: () -> Unit
+    onSend:        (String) -> Unit,
+    onCancel:      () -> Unit,
+    onVoiceTap:    () -> Unit
 ) {
-    var inputText by remember { mutableStateOf("") }
+    var text by remember { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
 
-    val sendButtonScale by animateFloatAsState(
-        targetValue = if (inputText.isNotBlank() && !isGenerating) 1f else 0.85f,
+    val sendScale by animateFloatAsState(
+        targetValue   = if (text.isNotBlank() && !isGenerating) 1f else 0.82f,
         animationSpec = spring(stiffness = Spring.StiffnessMedium),
-        label = "sendScale"
+        label         = "sendScale"
     )
 
-    // Pulse animation for active voice mic
-    val infiniteTransition = rememberInfiniteTransition(label = "voicePulse")
-    val voicePulse by infiniteTransition.animateFloat(
+    // Mic pulse
+    val micPulse = rememberInfiniteTransition(label = "micPulse")
+    val micScale by micPulse.animateFloat(
         initialValue = 1f,
-        targetValue = 1.18f,
+        targetValue  = 1.2f,
         animationSpec = infiniteRepeatable(
-            animation = tween(900, easing = FastOutSlowInEasing),
+            animation  = tween(800, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "pulse"
-    )
-    // Glow alpha for mic button halo
-    val micGlowAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 0.55f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(900, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "micGlow"
+        label = "micScale"
     )
 
-    Surface(
-        color = NovaBlack,
-        modifier = Modifier.fillMaxWidth()
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NovaBlack)
     ) {
+        // Faint top divider
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(0.5.dp)
+                .background(NovaBubbleBorder)
+                .align(Alignment.TopStart)
+        )
+
         Row(
             modifier = Modifier
-                .padding(horizontal = 8.dp, vertical = 8.dp)
+                .padding(horizontal = 12.dp, vertical = 10.dp)
                 .navigationBarsPadding()
                 .imePadding(),
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            verticalAlignment    = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Mic / voice toggle button
+            // Mic / stop-voice button
             Box(
                 contentAlignment = Alignment.Center,
-                modifier = Modifier.size(42.dp)
+                modifier         = Modifier.size(44.dp)
             ) {
-                // Purple glow halo behind mic button when voice active
                 if (isVoiceActive) {
+                    // Glow halo
                     Box(
                         modifier = Modifier
-                            .size(42.dp)
-                            .scale(voicePulse)
+                            .size(44.dp)
+                            .scale(micScale)
                             .background(
-                                brush = Brush.radialGradient(
-                                    colors = listOf(
-                                        NovaPurpleGlow.copy(alpha = micGlowAlpha),
+                                Brush.radialGradient(
+                                    listOf(
+                                        NovaPurpleCore.copy(alpha = 0.3f),
                                         Color.Transparent
                                     )
                                 ),
-                                shape = CircleShape
+                                CircleShape
                             )
                     )
                 }
                 IconButton(
-                    onClick = onVoiceToggle,
+                    onClick  = onVoiceTap,
                     modifier = Modifier
-                        .size(42.dp)
-                        .then(
-                            if (isVoiceActive)
-                                Modifier
-                                    .scale(1f)
-                                    .background(NovaPurpleDeep.copy(alpha = 0.35f), CircleShape)
-                            else
-                                Modifier
+                        .size(44.dp)
+                        .background(
+                            if (isVoiceActive) NovaPurpleDeep.copy(alpha = 0.5f)
+                            else Color.Transparent,
+                            CircleShape
                         )
                 ) {
                     Icon(
-                        imageVector = if (isVoiceActive) Icons.Default.Stop else Icons.Default.Mic,
+                        imageVector       = if (isVoiceActive) Icons.Default.Stop else Icons.Default.Mic,
                         contentDescription = if (isVoiceActive) "End voice" else "Start voice",
-                        tint = if (isVoiceActive) NovaPurpleCore else NovaTextSecondary
+                        tint              = if (isVoiceActive) NovaPurpleGlow else NovaTextDim,
+                        modifier          = Modifier.size(22.dp)
                     )
                 }
             }
 
-            // Text input field
+            // Text field
             TextField(
-                value = inputText,
-                onValueChange = { inputText = it },
-                modifier = Modifier.weight(1f),
-                placeholder = {
+                value         = text,
+                onValueChange = { text = it },
+                modifier      = Modifier.weight(1f),
+                placeholder   = {
                     Text(
-                        text = when {
-                            isVoiceActive -> "Voice mode active..."
-                            currentMode == NovaMode.AUTOMATION -> "Ask Nova to do something..."
-                            else -> "Talk to Nova..."
+                        text  = when {
+                            isVoiceActive -> "voice mode on"
+                            currentMode == NovaMode.AUTOMATION -> "ask nova to do something..."
+                            else          -> "message nova..."
                         },
-                        color = NovaTextDim
+                        color = NovaTextDim,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp)
                     )
                 },
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = NovaDarkGray,
-                    unfocusedContainerColor = NovaDarkGray,
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    cursorColor = NovaPurpleCore,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent
+                colors        = TextFieldDefaults.colors(
+                    focusedContainerColor    = InputBg,
+                    unfocusedContainerColor  = InputBg,
+                    focusedTextColor         = Color.White,
+                    unfocusedTextColor       = Color.White,
+                    cursorColor              = NovaPurpleCore,
+                    focusedIndicatorColor    = Color.Transparent,
+                    unfocusedIndicatorColor  = Color.Transparent
                 ),
-                shape = RoundedCornerShape(24.dp),
+                shape          = RoundedCornerShape(22.dp),
+                textStyle      = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(
                     onSend = {
-                        if (inputText.isNotBlank() && !isGenerating) {
-                            onSend(inputText)
-                            inputText = ""
-                            focusManager.clearFocus()
+                        if (text.isNotBlank() && !isGenerating) {
+                            onSend(text); text = ""; focusManager.clearFocus()
                         }
                     }
                 ),
                 singleLine = false,
-                maxLines = 4,
-                enabled = !isGenerating && !isVoiceActive
+                maxLines   = 4,
+                enabled    = !isGenerating && !isVoiceActive
             )
 
-            // Send / Stop button
+            // Send / Cancel
             if (isGenerating) {
                 IconButton(
-                    onClick = onCancel,
+                    onClick  = onCancel,
                     modifier = Modifier
-                        .size(42.dp)
+                        .size(44.dp)
                         .background(NovaRed.copy(alpha = 0.15f), CircleShape)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Stop,
-                        contentDescription = "Stop generating",
-                        tint = NovaRed
+                        imageVector        = Icons.Default.Stop,
+                        contentDescription = "Stop",
+                        tint               = NovaRed,
+                        modifier           = Modifier.size(20.dp)
                     )
                 }
             } else {
                 IconButton(
-                    onClick = {
-                        if (inputText.isNotBlank()) {
-                            onSend(inputText)
-                            inputText = ""
-                            focusManager.clearFocus()
+                    onClick  = {
+                        if (text.isNotBlank()) {
+                            onSend(text); text = ""; focusManager.clearFocus()
                         }
                     },
                     modifier = Modifier
-                        .size(42.dp)
-                        .scale(sendButtonScale)
+                        .size(44.dp)
+                        .scale(sendScale)
                         .background(
-                            if (inputText.isNotBlank()) NovaPurpleCore
-                            else NovaPurpleCore.copy(alpha = 0.3f),
+                            if (text.isNotBlank()) NovaPurpleCore
+                            else NovaSurface,
                             CircleShape
                         ),
-                    enabled = inputText.isNotBlank()
+                    enabled = text.isNotBlank()
                 ) {
                     Icon(
-                        imageVector = Icons.Default.ArrowUpward,
+                        imageVector        = Icons.Default.ArrowUpward,
                         contentDescription = "Send",
-                        tint = Color.White
+                        tint               = if (text.isNotBlank()) Color.White
+                                             else NovaTextDim,
+                        modifier           = Modifier.size(20.dp)
                     )
                 }
             }
@@ -713,100 +830,89 @@ private fun ChatInputBar(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Voice mode overlay
+// Voice overlay
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun VoiceModeOverlay(
-    connectionState: ElevenLabsVoiceService.ConnectionState,
-    isSpeaking: Boolean,
+private fun VoiceOverlay(
+    state:    ElevenLabsVoiceService.ConnectionState,
+    speaking: Boolean,
     onEndCall: () -> Unit
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "voiceWave")
+    val waveTransition = rememberInfiniteTransition(label = "wave")
+    val isActive = state == ElevenLabsVoiceService.ConnectionState.CONNECTED
 
-    val statusText = when (connectionState) {
-        ElevenLabsVoiceService.ConnectionState.CONNECTING -> "Connecting..."
-        ElevenLabsVoiceService.ConnectionState.CONNECTED ->
-            if (isSpeaking) "Nova is speaking..." else "Listening..."
-        ElevenLabsVoiceService.ConnectionState.ERROR -> "Connection error"
-        ElevenLabsVoiceService.ConnectionState.DISCONNECTED -> "Disconnected"
+    val statusText = when (state) {
+        ElevenLabsVoiceService.ConnectionState.CONNECTING   -> "connecting..."
+        ElevenLabsVoiceService.ConnectionState.CONNECTED    -> if (speaking) "nova is speaking" else "listening"
+        ElevenLabsVoiceService.ConnectionState.ERROR        -> "connection error"
+        ElevenLabsVoiceService.ConnectionState.DISCONNECTED -> "disconnected"
     }
-    val statusColor = when (connectionState) {
-        ElevenLabsVoiceService.ConnectionState.CONNECTED ->
-            if (isSpeaking) NovaPurpleCore else NovaPurpleGlow
-        ElevenLabsVoiceService.ConnectionState.CONNECTING -> NovaPurpleAmbient
-        ElevenLabsVoiceService.ConnectionState.ERROR -> NovaRed
+    val accent = when (state) {
+        ElevenLabsVoiceService.ConnectionState.CONNECTED    ->
+            if (speaking) NovaPurpleGlow else NovaPurpleCore
+        ElevenLabsVoiceService.ConnectionState.CONNECTING   -> NovaPurpleAmbient
+        ElevenLabsVoiceService.ConnectionState.ERROR        -> NovaRed
         ElevenLabsVoiceService.ConnectionState.DISCONNECTED -> NovaTextDim
     }
 
-    Surface(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(20.dp),
-        color = NovaSurface
+            .background(NovaSurface)
+            .padding(vertical = 20.dp),
+        contentAlignment = Alignment.Center
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Animated waveform bars
+            // Waveform
             Row(
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                verticalAlignment = Alignment.CenterVertically
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment     = Alignment.CenterVertically
             ) {
-                repeat(7) { index ->
-                    val isActive =
-                        connectionState == ElevenLabsVoiceService.ConnectionState.CONNECTED
-                    val barHeight by infiniteTransition.animateFloat(
-                        initialValue = if (isActive) 6f else 4f,
-                        targetValue = if (isActive) 32f else 8f,
+                repeat(9) { i ->
+                    val barH by waveTransition.animateFloat(
+                        initialValue = if (isActive) 6f else 3f,
+                        targetValue  = if (isActive) 28f else 6f,
                         animationSpec = infiniteRepeatable(
-                            animation = tween(
-                                durationMillis = 350 + index * 70,
-                                easing = FastOutSlowInEasing
-                            ),
+                            animation  = tween(300 + i * 60, easing = FastOutSlowInEasing),
                             repeatMode = RepeatMode.Reverse
                         ),
-                        label = "bar_$index"
+                        label = "bar$i"
                     )
                     Box(
                         modifier = Modifier
-                            .width(4.dp)
-                            .height(barHeight.dp)
+                            .width(3.dp)
+                            .height(barH.dp)
                             .clip(RoundedCornerShape(2.dp))
-                            .background(
-                                if (isActive) statusColor
-                                else NovaSurfaceVariant
-                            )
+                            .background(if (isActive) accent else NovaSurfaceVariant)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
-
             Text(
-                text = statusText,
-                style = MaterialTheme.typography.bodyMedium,
-                color = statusColor,
-                fontWeight = FontWeight.SemiBold
+                text  = statusText,
+                color = accent,
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontSize     = 13.sp,
+                    letterSpacing = 0.5.sp
+                )
             )
 
-            Spacer(modifier = Modifier.height(18.dp))
-
-            // End call button
-            Button(
-                onClick = onEndCall,
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(containerColor = NovaRed),
-                modifier = Modifier.size(56.dp),
-                contentPadding = PaddingValues(0.dp)
+            // End call
+            IconButton(
+                onClick  = onEndCall,
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(NovaRed.copy(alpha = 0.15f), CircleShape)
             ) {
                 Icon(
-                    imageVector = Icons.Default.Stop,
-                    contentDescription = "End voice call",
-                    tint = Color.White,
-                    modifier = Modifier.size(28.dp)
+                    imageVector        = Icons.Default.Stop,
+                    contentDescription = "End voice",
+                    tint               = NovaRed,
+                    modifier           = Modifier.size(22.dp)
                 )
             }
         }
