@@ -179,6 +179,12 @@ object ElevenLabsVoiceService {
     private val audioQueue = ConcurrentLinkedQueue<ByteArray>()
     private var isPlaybackRunning = false
 
+    // Pre-buffer: captures mic audio between wake word detection and WebSocket connection
+    // so the user's command spoken right after "Hey Nova" is not lost
+    private val preBuffer = ConcurrentLinkedQueue<ByteArray>()
+    private var preBufferJob: Job? = null
+    private var preBufferAudioRecord: android.media.AudioRecord? = null
+
     // Echo cancellation
     private var acousticEchoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
@@ -207,6 +213,99 @@ object ElevenLabsVoiceService {
     private var onStatusChange: (String) -> Unit = {}
 
     // ── Public API ─────────────────────────────────────────────────────
+
+    /**
+     * Start buffering mic audio IMMEDIATELY after wake word detection.
+     *
+     * Called by WakeWordService right when "Hey Nova" is detected, BEFORE
+     * the ElevenLabs WebSocket is connected. This captures the user's command
+     * spoken right after the wake word so it isn't lost during the ~1-2s
+     * connection handshake.
+     *
+     * The buffered audio is flushed to the WebSocket once connect() completes.
+     */
+    fun startPreBuffering(context: android.content.Context) {
+        if (preBufferJob?.isActive == true) return
+        preBuffer.clear()
+
+        preBufferJob = coroutineScope.launch {
+            try {
+                if (ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+                    != PackageManager.PERMISSION_GRANTED) {
+                    Log.w(TAG, "PreBuffer: mic permission not granted")
+                    return@launch
+                }
+
+                val bufferSize = android.media.AudioRecord.getMinBufferSize(
+                    SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT
+                )
+                if (bufferSize <= 0) {
+                    Log.e(TAG, "PreBuffer: invalid buffer size")
+                    return@launch
+                }
+
+                val recorder = android.media.AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT,
+                    bufferSize * 2
+                )
+
+                if (recorder.state != android.media.AudioRecord.STATE_INITIALIZED) {
+                    Log.e(TAG, "PreBuffer: AudioRecord init failed")
+                    recorder.release()
+                    return@launch
+                }
+
+                preBufferAudioRecord = recorder
+                recorder.startRecording()
+                Log.i(TAG, "PreBuffer: started capturing mic audio")
+
+                val buffer = ShortArray(AUDIO_CHUNK_SIZE)
+                // Buffer for up to 5 seconds (safety limit)
+                val maxChunks = (SAMPLE_RATE * 5) / AUDIO_CHUNK_SIZE
+
+                var chunkCount = 0
+                while (chunkCount < maxChunks && preBufferJob?.isActive == true) {
+                    val readCount = recorder.read(buffer, 0, buffer.size)
+                    if (readCount > 0) {
+                        // Convert to PCM bytes (same format connect() sends)
+                        val pcmBytes = ByteArray(readCount * 2)
+                        ByteBuffer.wrap(pcmBytes).order(ByteOrder.LITTLE_ENDIAN)
+                            .asShortBuffer().put(buffer, 0, readCount)
+                        preBuffer.add(pcmBytes)
+                        chunkCount++
+                    } else if (readCount < 0) {
+                        break
+                    }
+                    delay(5)
+                }
+            } catch (e: CancellationException) {
+                // Normal — stopped by connect() taking over
+            } catch (e: Exception) {
+                Log.e(TAG, "PreBuffer error", e)
+            }
+        }
+    }
+
+    /**
+     * Stop pre-buffering and release the temporary AudioRecord.
+     * Called internally when connect() takes over mic capture.
+     */
+    private fun stopPreBuffering() {
+        preBufferJob?.cancel()
+        preBufferJob = null
+        try {
+            preBufferAudioRecord?.let {
+                if (it.recordingState == android.media.AudioRecord.RECORDSTATE_RECORDING) {
+                    it.stop()
+                }
+                it.release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error stopping pre-buffer recorder", e)
+        }
+        preBufferAudioRecord = null
+    }
 
     /**
      * Connect to ElevenLabs Conversational AI WebSocket.
@@ -277,8 +376,25 @@ object ElevenLabsVoiceService {
                 reconnectAttempts = 0
                 emitStatusChange("Connected to ElevenLabs Conversational AI")
 
-                // Start microphone recording
+                // Stop pre-buffer recording (releases the temporary AudioRecord)
+                stopPreBuffering()
+
+                // Start microphone recording on the main AudioRecord
                 startMicrophoneCapture()
+
+                // Flush any pre-buffered audio captured between wake word and now
+                val bufferedChunks = preBuffer.size
+                if (bufferedChunks > 0) {
+                    Log.i(TAG, "Flushing $bufferedChunks pre-buffered audio chunks")
+                    while (preBuffer.isNotEmpty()) {
+                        val pcmBytes = preBuffer.poll() ?: break
+                        val base64Audio = Base64.getEncoder().encodeToString(pcmBytes)
+                        val message = JsonObject().apply {
+                            addProperty("user_audio_chunk", base64Audio)
+                        }
+                        webSocket?.send(message.toString())
+                    }
+                }
 
                 true
             } else {
@@ -301,6 +417,9 @@ object ElevenLabsVoiceService {
      */
     fun disconnect() {
         Log.i(TAG, "Disconnecting from ElevenLabs Conversational AI")
+
+        stopPreBuffering()
+        preBuffer.clear()
 
         reconnectJob?.cancel()
         reconnectAttempts = 0

@@ -279,7 +279,11 @@ class WakeWordService : Service() {
         }
         sendBroadcast(broadcastIntent)
 
-        // 5. Emit event for ChatViewModel (no BroadcastReceiver overhead)
+        // 5. Start pre-buffering mic audio IMMEDIATELY so user's command after
+        //    "Hey Nova" is captured during the ~1-2s ElevenLabs connection delay
+        ElevenLabsVoiceService.startPreBuffering(this)
+
+        // 6. Emit event for ChatViewModel (no BroadcastReceiver overhead)
         // ChatViewModel collects this event and handles starting the voice session.
         // Do NOT also call ActiveVoiceManagerHolder directly — that causes a
         // double voice-session race condition where two ElevenLabs connections compete.
