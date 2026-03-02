@@ -5,14 +5,16 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
 import android.os.Build
 import android.os.IBinder
+import android.util.TypedValue
 import android.view.Gravity
-import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
-import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
@@ -25,6 +27,7 @@ import kotlinx.coroutines.flow.collectLatest
  * whenever WorkflowExecutor is running a multi-step task.
  *
  * The bubble appears on top of any app (requires SYSTEM_ALERT_WINDOW permission).
+ * Uses programmatic views (no XML layout required).
  */
 class TaskBubbleService : Service() {
 
@@ -45,6 +48,9 @@ class TaskBubbleService : Service() {
 
     private lateinit var windowManager: WindowManager
     private var bubbleView: View? = null
+    private var tvTitle: TextView? = null
+    private var tvStatus: TextView? = null
+    private var progressBar: ProgressBar? = null
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -79,7 +85,7 @@ class TaskBubbleService : Service() {
 
         val notif = NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
             .setContentTitle("Nova is working...")
-            .setSmallIcon(R.drawable.ic_nova_bubble)
+            .setSmallIcon(R.drawable.ic_nova_notification)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .build()
@@ -113,15 +119,57 @@ class TaskBubbleService : Service() {
     }
 
     // ────────────────────────────────────────────────────────────
-    // BUBBLE UI
+    // BUBBLE UI (programmatic — no XML layout needed)
     // ────────────────────────────────────────────────────────────
 
+    private fun dpToPx(dp: Int): Int {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP, dp.toFloat(), resources.displayMetrics
+        ).toInt()
+    }
+
+    private fun buildBubbleView(): View {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpToPx(16), dpToPx(12), dpToPx(16), dpToPx(12))
+            setBackgroundColor(Color.parseColor("#E0202020"))
+        }
+
+        val title = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        tvTitle = title
+        container.addView(title)
+
+        val status = TextView(this).apply {
+            setTextColor(Color.parseColor("#CCCCCC"))
+            textSize = 12f
+        }
+        tvStatus = status
+        container.addView(status)
+
+        val pb = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(4)
+            )
+            lp.topMargin = dpToPx(6)
+            layoutParams = lp
+        }
+        progressBar = pb
+        container.addView(pb)
+
+        return container
+    }
+
     private fun showBubble(state: TaskProgressState) {
-        val inflater = LayoutInflater.from(this)
-        val view = inflater.inflate(R.layout.overlay_task_bubble, null)
+        val view = buildBubbleView()
         bubbleView = view
 
-        updateBubbleContent(view, state)
+        updateBubbleContent(state)
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -143,20 +191,20 @@ class TaskBubbleService : Service() {
     }
 
     private fun updateBubble(state: TaskProgressState) {
-        val view = bubbleView ?: return
-        updateBubbleContent(view, state)
+        if (bubbleView == null) return
+        updateBubbleContent(state)
     }
 
-    private fun updateBubbleContent(view: View, state: TaskProgressState) {
-        view.findViewById<TextView>(R.id.tvTaskTitle)?.text = state.title
-        view.findViewById<TextView>(R.id.tvTaskStatus)?.text = state.statusMessage
-        view.findViewById<ProgressBar>(R.id.pbTaskProgress)?.progress = state.progress
+    private fun updateBubbleContent(state: TaskProgressState) {
+        tvTitle?.text = state.title
+        tvStatus?.text = state.statusMessage
+        progressBar?.progress = state.progress
 
-        val icon = view.findViewById<ImageView>(R.id.ivTaskIcon)
+        // Update title color based on status
         when {
-            state.isComplete -> icon?.setImageResource(R.drawable.ic_check_circle)
-            state.isFailed -> icon?.setImageResource(R.drawable.ic_error)
-            else -> icon?.setImageResource(R.drawable.ic_nova_bubble)
+            state.isComplete -> tvTitle?.setTextColor(Color.parseColor("#4CAF50"))
+            state.isFailed -> tvTitle?.setTextColor(Color.parseColor("#F44336"))
+            else -> tvTitle?.setTextColor(Color.WHITE)
         }
     }
 
@@ -164,6 +212,9 @@ class TaskBubbleService : Service() {
         bubbleView?.let {
             try { windowManager.removeView(it) } catch (_: Exception) {}
             bubbleView = null
+            tvTitle = null
+            tvStatus = null
+            progressBar = null
         }
     }
 }

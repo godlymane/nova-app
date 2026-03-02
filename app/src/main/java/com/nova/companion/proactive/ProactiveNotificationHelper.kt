@@ -53,7 +53,7 @@ object ProactiveNotificationHelper {
         )
 
         val notif = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_nova_bubble)
+            .setSmallIcon(R.drawable.ic_nova_notification)
             .setContentTitle(title)
             .setContentText(message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(message))

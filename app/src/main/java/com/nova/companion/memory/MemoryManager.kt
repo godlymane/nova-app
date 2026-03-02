@@ -2,6 +2,7 @@ package com.nova.companion.memory
 
 import android.util.Log
 import com.nova.companion.data.NovaDatabase
+import com.nova.companion.data.dao.CategoryCount
 import com.nova.companion.data.entity.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -581,19 +582,13 @@ class MemoryManager(private val db: NovaDatabase) {
     suspend fun buildContext(currentMessage: String): String {
         val parts = mutableListOf<String>()
 
-        // 1. User profile
-        val profile = db.userProfileDao().get()
-        if (profile != null) {
-            val profileParts = mutableListOf<String>()
-            if (profile.name.isNotBlank()) profileParts.add("Name: ${profile.name}")
-            if (profile.age > 0) profileParts.add("Age: ${profile.age}")
-            if (profile.location.isNotBlank()) profileParts.add("Location: ${profile.location}")
-            if (profile.occupation.isNotBlank()) profileParts.add("Occupation: ${profile.occupation}")
-            if (profile.fitness.isNotBlank()) profileParts.add("Fitness: ${profile.fitness}")
-            if (profile.goals.isNotBlank()) profileParts.add("Goals: ${profile.goals}")
-            if (profileParts.isNotEmpty()) {
-                parts.add("USER PROFILE: " + profileParts.joinToString(" | "))
-            }
+        // 1. User profile (key-value store)
+        val profileEntries = db.userProfileDao().getAll()
+        if (profileEntries.isNotEmpty()) {
+            val profileParts = profileEntries
+                .take(MAX_PROFILE_ENTRIES)
+                .map { "${it.key}: ${it.value}" }
+            parts.add("USER PROFILE: " + profileParts.joinToString(" | "))
         }
 
         // 2. Structured facts (new deep memory)
@@ -649,7 +644,7 @@ class MemoryManager(private val db: NovaDatabase) {
             DailySummary(
                 date = today,
                 summary = summary,
-                memoryCount = todayMemories.size
+                keyEvents = todayMemories.take(5).joinToString(", ") { it.category }
             )
         )
 
@@ -690,21 +685,15 @@ class MemoryManager(private val db: NovaDatabase) {
         // Age
         val agePattern = Regex("""(?:i'm|im|i am)\s+(\d{1,2})\s*(?:years old|yrs|yo|year old)""")
         agePattern.find(msg)?.let { match ->
-            db.userProfileDao().get()?.let { profile ->
-                db.userProfileDao().upsert(
-                    profile.copy(age = match.groupValues[1].toIntOrNull() ?: profile.age)
-                )
-            }
+            val age = match.groupValues[1]
+            db.userProfileDao().upsert(UserProfile(key = "age", value = age))
         }
 
         // Location
         val locationPattern = Regex("""(?:i live in|i'm from|im from|based in|i stay in)\s+([A-Za-z\s]{2,30})""")
         locationPattern.find(msg)?.let { match ->
-            db.userProfileDao().get()?.let { profile ->
-                db.userProfileDao().upsert(
-                    profile.copy(location = match.groupValues[1].trim())
-                )
-            }
+            val location = match.groupValues[1].trim()
+            db.userProfileDao().upsert(UserProfile(key = "location", value = location))
         }
     }
 
@@ -734,7 +723,8 @@ class MemoryManager(private val db: NovaDatabase) {
         val totalMemories = db.memoryDao().count()
         val totalFacts = db.userFactDao().count()
         val totalSummaries = db.dailySummaryDao().count()
-        val byCategory = db.memoryDao().getCountByCategory()
+        val byCategory = db.memoryDao().getCountByCategoryRaw()
+            .associate { it.category to it.cnt }
         return MemoryStats(
             totalMemories = totalMemories,
             totalFacts = totalFacts,
@@ -749,4 +739,36 @@ class MemoryManager(private val db: NovaDatabase) {
         val totalSummaries: Int,
         val byCategory: Map<String, Int>
     )
+
+    // ────────────────────────────────────────────────────────────
+    // FACADE METHODS (called by ViewModels)
+    // ────────────────────────────────────────────────────────────
+
+    /**
+     * Run memory importance decay for memories not accessed recently.
+     * Should be called on app startup.
+     */
+    suspend fun runDecay() {
+        val oneWeekAgo = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(7)
+        db.memoryDao().decayUnaccessed(oneWeekAgo)
+        val deleted = db.memoryDao().deleteDecayed()
+        Log.d(TAG, "Decay complete: $deleted dead memories removed")
+    }
+
+    /**
+     * Build and return memory context for the current user message.
+     * Alias for [buildContext] — used by ViewModels before LLM generation.
+     */
+    suspend fun injectContext(userMessage: String): String {
+        return buildContext(userMessage)
+    }
+
+    /**
+     * Process a completed conversation exchange: extract memories and structured facts.
+     * Called by ViewModels after Nova responds.
+     */
+    suspend fun processConversation(userMessage: String, novaResponse: String) {
+        extractMemories(userMessage, novaResponse)
+        extractAndStoreFacts(userMessage, novaResponse)
+    }
 }

@@ -24,4 +24,10 @@ interface DailySummaryDao {
 
     @Delete
     suspend fun delete(summary: DailySummary)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(summary: DailySummary)
+
+    @Query("SELECT COUNT(*) FROM daily_summaries")
+    suspend fun count(): Int
 }

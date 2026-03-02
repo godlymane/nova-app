@@ -51,4 +51,22 @@ interface MemoryDao {
     /** Check for duplicate content before inserting */
     @Query("SELECT * FROM memories WHERE content = :content AND category = :category LIMIT 1")
     suspend fun findExact(content: String, category: String): Memory?
+
+    /** Get memories created/accessed since a given timestamp */
+    @Query("SELECT * FROM memories WHERE createdAt >= :since ORDER BY importance DESC, lastAccessed DESC LIMIT :limit")
+    suspend fun getMemoriesSince(since: Long, limit: Int = 20): List<Memory>
+
+    /** Delete old memories with low importance (for pruning) */
+    @Query("DELETE FROM memories WHERE lastAccessed < :cutoff AND importance <= :maxImportance")
+    suspend fun deleteOldLowImportance(cutoff: Long, maxImportance: Int): Int
+
+    /** Get count of memories grouped by category */
+    @Query("SELECT category, COUNT(*) as cnt FROM memories GROUP BY category")
+    suspend fun getCountByCategoryRaw(): List<CategoryCount>
 }
+
+/** Room result class for category count query */
+data class CategoryCount(
+    val category: String,
+    val cnt: Int
+)
