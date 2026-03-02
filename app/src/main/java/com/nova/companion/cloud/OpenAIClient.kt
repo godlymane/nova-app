@@ -352,4 +352,93 @@ object OpenAIClient {
             null
         }
     }
+
+    // ── Gemini Fallback (chat completion) ────────────────────────
+
+    /**
+     * Gemini chat completion as fallback when OpenAI is unavailable.
+     */
+    suspend fun geminiChatCompletion(
+        userMessage: String,
+        conversationHistory: List<Pair<String, String>> = emptyList(),
+        context: Context
+    ): String? = withContext(Dispatchers.IO) {
+        val apiKey = CloudConfig.geminiApiKey
+        if (apiKey.isBlank()) {
+            Log.w(TAG, "Gemini API key not configured")
+            return@withContext null
+        }
+
+        val contents = JsonArray().apply {
+            // Gemini doesn't have a system role — prepend as first user message
+            add(JsonObject().apply {
+                addProperty("role", "user")
+                add("parts", JsonArray().apply {
+                    add(JsonObject().apply {
+                        addProperty("text", "[System instruction] $NOVA_SYSTEM_PROMPT")
+                    })
+                })
+            })
+            add(JsonObject().apply {
+                addProperty("role", "model")
+                add("parts", JsonArray().apply {
+                    add(JsonObject().apply {
+                        addProperty("text", "Got it. I'm Nova.")
+                    })
+                })
+            })
+            // Conversation history
+            for ((role, content) in conversationHistory) {
+                add(JsonObject().apply {
+                    addProperty("role", if (role == "user") "user" else "model")
+                    add("parts", JsonArray().apply {
+                        add(JsonObject().apply { addProperty("text", content) })
+                    })
+                })
+            }
+            // Current message
+            add(JsonObject().apply {
+                addProperty("role", "user")
+                add("parts", JsonArray().apply {
+                    add(JsonObject().apply { addProperty("text", userMessage) })
+                })
+            })
+        }
+
+        val body = JsonObject().apply {
+            add("contents", contents)
+            add("generationConfig", JsonObject().apply {
+                addProperty("maxOutputTokens", 512)
+                addProperty("temperature", 0.8)
+            })
+        }
+
+        val request = Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        try {
+            val response = client.newCall(request).executeSuspend()
+            val responseBody = response.body?.string()
+            response.close()
+
+            if (!response.isSuccessful) {
+                Log.e(TAG, "Gemini chat failed: ${response.code} - $responseBody")
+                return@withContext null
+            }
+
+            val json = JsonParser.parseString(responseBody).asJsonObject
+            val parts = json.getAsJsonArray("candidates")
+                ?.get(0)?.asJsonObject
+                ?.getAsJsonObject("content")
+                ?.getAsJsonArray("parts")
+
+            parts?.get(0)?.asJsonObject?.get("text")?.asString
+        } catch (e: Exception) {
+            Log.e(TAG, "Gemini chat error", e)
+            null
+        }
+    }
 }

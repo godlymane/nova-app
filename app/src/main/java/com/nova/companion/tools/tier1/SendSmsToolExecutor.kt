@@ -2,6 +2,7 @@ package com.nova.companion.tools.tier1
 
 import android.Manifest
 import android.content.Context
+import android.os.Build
 import android.telephony.SmsManager
 import android.util.Log
 import com.nova.companion.tools.ContactLookupHelper
@@ -44,7 +45,12 @@ object SendSmsToolExecutor {
             if (contacts.isEmpty()) return ToolResult(false, "I couldn't find $contactName in your contacts")
 
             val contact = contacts.first()
-            val smsManager = SmsManager.getDefault()
+            val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                context.getSystemService(SmsManager::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                SmsManager.getDefault()
+            }
             val parts = smsManager.divideMessage(message)
             if (parts.size > 1) {
                 smsManager.sendMultipartTextMessage(contact.phoneNumber, null, parts, null, null)

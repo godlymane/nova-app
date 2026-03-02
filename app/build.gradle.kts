@@ -149,7 +149,7 @@ dependencies {
     implementation("androidx.compose.animation:animation-graphics")
 
     // Picovoice Porcupine — wake word detection
-    implementation("ai.picovoice:porcupine-android:3.0.2")
+    implementation("ai.picovoice:porcupine-android:4.0.0")
 
     // ElevenLabs Android SDK — Conversational AI with client tools
     implementation("io.elevenlabs:elevenlabs-android:0.7.2")

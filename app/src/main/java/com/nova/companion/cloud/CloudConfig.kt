@@ -16,10 +16,13 @@ object CloudConfig {
 
     private const val TAG = "NovaCloud"
 
-    // Keys injected via BuildConfig from local.properties
-    val elevenLabsApiKey: String get() = BuildConfig.ELEVENLABS_API_KEY
-    val elevenLabsVoiceId: String get() = BuildConfig.ELEVENLABS_VOICE_ID
-    val openAiApiKey: String get() = BuildConfig.OPENAI_API_KEY
+    // Keys injected via BuildConfig from local.properties (trimmed to guard against whitespace in local.properties)
+    val elevenLabsApiKey: String get() = BuildConfig.ELEVENLABS_API_KEY.trim()
+    val elevenLabsVoiceId: String get() = BuildConfig.ELEVENLABS_VOICE_ID.trim()
+    val openAiApiKey: String get() = BuildConfig.OPENAI_API_KEY.trim()
+    val geminiApiKey: String get() = try { BuildConfig.GEMINI_API_KEY.trim() } catch (_: Exception) { "" }
+    val anthropicApiKey: String get() = try { BuildConfig.ANTHROPIC_API_KEY.trim() } catch (_: Exception) { "" }
+    val picovoiceAccessKey: String get() = try { BuildConfig.PICOVOICE_ACCESS_KEY.trim() } catch (_: Exception) { "" }
 
     // ── Network ────────────────────────────────────────────────
 
@@ -39,6 +42,35 @@ object CloudConfig {
      */
     fun hasElevenLabsKey(): Boolean = elevenLabsApiKey.isNotBlank()
     fun hasOpenAiKey(): Boolean = openAiApiKey.isNotBlank()
+    fun hasGeminiKey(): Boolean = geminiApiKey.isNotBlank()
+    fun hasAnthropicKey(): Boolean = anthropicApiKey.isNotBlank()
+    fun hasPicovoiceKey(): Boolean = picovoiceAccessKey.isNotBlank()
+
+    /**
+     * Run startup diagnostics — logs which services are available.
+     * Call from MainActivity.onCreate() so missing keys surface immediately.
+     */
+    fun logStartupDiagnostics() {
+        Log.i(TAG, "── Nova Cloud Diagnostics ──────────────────")
+        Log.i(TAG, "  OpenAI:     ${if (hasOpenAiKey()) "OK" else "MISSING — cloud chat & automation disabled"}")
+        Log.i(TAG, "  ElevenLabs: ${if (hasElevenLabsKey()) "OK" else "MISSING — voice mode disabled"}")
+        Log.i(TAG, "  Gemini:     ${if (hasGeminiKey()) "OK" else "MISSING — Gemini fallback disabled"}")
+        Log.i(TAG, "  Anthropic:  ${if (hasAnthropicKey()) "OK" else "MISSING — Claude fallback disabled"}")
+        Log.i(TAG, "  Picovoice:  ${if (hasPicovoiceKey()) "OK" else "MISSING — wake word disabled"}")
+        Log.i(TAG, "────────────────────────────────────────────")
+    }
+
+    /**
+     * Returns a list of human-readable warnings for missing critical keys.
+     * Empty list = all critical keys present.
+     */
+    fun getMissingKeyWarnings(): List<String> {
+        val warnings = mutableListOf<String>()
+        if (!hasOpenAiKey()) warnings.add("OpenAI key missing — cloud chat and automation won't work")
+        if (!hasElevenLabsKey()) warnings.add("ElevenLabs key missing — voice mode disabled")
+        if (!hasPicovoiceKey()) warnings.add("Picovoice key missing — 'Hey Nova' wake word disabled")
+        return warnings
+    }
 
     // ── Usage Tracking ─────────────────────────────────────────
 

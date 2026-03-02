@@ -25,13 +25,11 @@ object DeviceStateCollector {
     private fun collectAudioState(context: Context, snapshot: ContextSnapshot): ContextSnapshot {
         return try {
             val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            val isHeadphones = audioManager.isWiredHeadsetOn ||
-                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && audioManager.getDevices(
-                    AudioManager.GET_DEVICES_OUTPUTS
-                ).any { it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+            val isHeadphones = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .any { it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
                         it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET ||
                         it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
-                        it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO })
+                        it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
 
             snapshot.copy(isHeadphonesConnected = isHeadphones)
         } catch (e: Exception) {

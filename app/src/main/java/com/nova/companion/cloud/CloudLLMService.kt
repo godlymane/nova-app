@@ -9,6 +9,7 @@ import com.google.gson.JsonParser
 import com.nova.companion.tools.ToolResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -47,11 +48,40 @@ object CloudLLMService {
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    // Retry configuration
+    private const val MAX_RETRIES = 3
+    private const val INITIAL_RETRY_DELAY_MS = 1_000L
+
+    // Maximum rounds of tool calls before forcing a final response
+    private const val MAX_TOOL_ROUNDS = 8
+
+    // Timeout for individual tool execution (30 seconds)
+    private const val TOOL_EXECUTION_TIMEOUT_MS = 30_000L
+
     // Nova's system prompt for automation mode
     private const val AUTOMATION_SYSTEM_PROMPT = """
-You are Nova, a casual AI companion. The user wants you to perform an action on their phone.
-Analyze the request and call the appropriate tool. Available tools will be provided.
-Be brief in your responses. Use casual language. Keep confirmations to 1-2 sentences.
+You are Nova, a fully agentic AI that controls an Android phone. You EXECUTE actions — you never refuse, hesitate, or say you "can't do that." If the user asks you to do something, you DO it.
+
+You have access to low-level UI automation tools: readScreen, tapOnScreen, typeText, scrollScreen, pressBack, navigateApp, waitForElement. Use these to accomplish ANY task on ANY app — even complex multi-step workflows.
+
+RULES:
+1. ALWAYS attempt the task. Never say "I can't" or "I don't have access." You have full device control.
+2. For multi-step tasks: open the app → readScreen to see what's visible → tap/type/scroll as needed → readScreen again → continue until done.
+3. After tapping or typing, ALWAYS call readScreen to verify the result before proceeding.
+4. Use navigateApp to open apps. Use readScreen to understand what's on screen. Use tapOnScreen to interact. Use typeText to enter text. Use scrollScreen to find things off-screen.
+5. Be aggressive about completing the task. If a button doesn't appear, scroll to find it. If text isn't visible, wait for it.
+6. When you're done, give a SHORT casual confirmation. 1-2 sentences max. No emojis.
+7. If a tool call fails, try an alternative approach. Don't give up after one failure.
+
+COMPLEX TASK PATTERNS:
+- "Order food from Swiggy/Zomato": Open app → search restaurant/food → add to cart → proceed to checkout
+- "Post an Instagram reel": Open Instagram → tap + button → select Reel → guide user through
+- "Book an Uber/Ola": Open app → enter destination → confirm ride
+- "Send WhatsApp message": Use sendWhatsApp tool directly (it handles everything)
+- "Play [song] on Spotify": Use playSpotify tool
+- "Set up [anything]": Use navigateApp + readScreen + tapOnScreen loop
+
+You are Nova. You talk casual — bro, nah, done, bet. Keep it short. Execute hard.
 """
 
     /**
@@ -72,18 +102,25 @@ Be brief in your responses. Use casual language. Keep confirmations to 1-2 sente
         userMessage: String,
         toolDefinitions: List<ToolDefinition>,
         context: Context,
+        conversationHistory: List<Pair<String, String>> = emptyList(),
         onToolCall: suspend (String, Map<String, Any>) -> ToolResult,
         onResponse: (String) -> Unit,
         onError: (String) -> Unit
     ) {
         return withContext(Dispatchers.IO) {
+            // Network check before making API calls
+            if (!CloudConfig.isOnline(context)) {
+                onError("No internet connection. Check your network and try again.")
+                return@withContext
+            }
+
             try {
                 when (provider) {
                     Provider.OPENAI -> processWithOpenAI(
-                        userMessage, toolDefinitions, context, onToolCall, onResponse, onError
+                        userMessage, toolDefinitions, context, conversationHistory, onToolCall, onResponse, onError
                     )
                     Provider.GEMINI -> processWithGemini(
-                        userMessage, toolDefinitions, context, onToolCall, onResponse, onError
+                        userMessage, toolDefinitions, context, conversationHistory, onToolCall, onResponse, onError
                     )
                 }
             } catch (e: Exception) {
@@ -99,6 +136,7 @@ Be brief in your responses. Use casual language. Keep confirmations to 1-2 sente
         userMessage: String,
         toolDefinitions: List<ToolDefinition>,
         context: Context,
+        conversationHistory: List<Pair<String, String>> = emptyList(),
         onToolCall: suspend (String, Map<String, Any>) -> ToolResult,
         onResponse: (String) -> Unit,
         onError: (String) -> Unit
@@ -114,101 +152,129 @@ Be brief in your responses. Use casual language. Keep confirmations to 1-2 sente
             JsonObject().apply {
                 addProperty("role", "system")
                 addProperty("content", AUTOMATION_SYSTEM_PROMPT)
-            },
-            JsonObject().apply {
-                addProperty("role", "user")
-                addProperty("content", userMessage)
             }
         )
+        // Add conversation history for context (last few messages)
+        for ((role, content) in conversationHistory) {
+            messages.add(JsonObject().apply {
+                addProperty("role", role)
+                addProperty("content", content)
+            })
+        }
+        messages.add(JsonObject().apply {
+            addProperty("role", "user")
+            addProperty("content", userMessage)
+        })
 
         val tools = buildOpenAITools(toolDefinitions)
 
         try {
-            // First request: send message + tools
-            val initialResponse = makeOpenAIRequest(
-                messages,
-                tools,
-                apiKey,
-                context
-            )
+            // Multi-step agentic loop: keep calling tools until LLM gives a final text response
+            var round = 0
+            while (round < MAX_TOOL_ROUNDS) {
+                round++
+                Log.d(TAG, "Tool round $round/$MAX_TOOL_ROUNDS")
 
-            if (initialResponse == null) {
-                onError("OpenAI request failed")
-                return
-            }
+                val response = makeOpenAIRequest(
+                    messages,
+                    tools, // Always include tools so LLM can call more
+                    apiKey,
+                    context
+                )
 
-            val responseJson = JsonParser.parseString(initialResponse).asJsonObject
-            val choice = responseJson.getAsJsonArray("choices")?.get(0)?.asJsonObject
+                if (response == null) {
+                    onError("OpenAI request failed (round $round)")
+                    return
+                }
 
-            // Check if LLM wants to call tools
-            val toolCalls = parseOpenAIToolCalls(choice)
+                val responseJson = JsonParser.parseString(response).asJsonObject
+                val choice = responseJson.getAsJsonArray("choices")?.get(0)?.asJsonObject
 
-            if (toolCalls.isEmpty()) {
-                // No tool calls, just return the text response
-                val finalText = choice?.getAsJsonObject("message")?.get("content")?.asString ?: ""
+                // Track tokens
                 CloudConfig.trackOpenAiTokens(
                     context,
                     responseJson.getAsJsonObject("usage")?.get("total_tokens")?.asInt ?: 0
                 )
+
+                // Check finish reason
+                val finishReason = choice?.get("finish_reason")?.asString
+
+                // Check if LLM wants to call tools
+                val assistantMessage = choice?.getAsJsonObject("message")
+                val toolCallArray = assistantMessage?.getAsJsonArray("tool_calls")
+
+                if (assistantMessage == null) {
+                    onError("OpenAI returned empty message (round $round)")
+                    return
+                }
+
+                if (toolCallArray == null || toolCallArray.size() == 0 || finishReason == "stop") {
+                    // No more tool calls — return the final text
+                    val finalText = assistantMessage.get("content")?.asString ?: ""
+                    onResponse(finalText)
+                    return
+                }
+
+                // Add assistant message with tool calls to conversation
+                messages.add(assistantMessage)
+
+                // Execute each tool call and append results
+                for (i in 0 until toolCallArray.size()) {
+                    val toolCallObj = toolCallArray.get(i).asJsonObject
+                    val toolCallId = toolCallObj.get("id")?.asString ?: "tc_${System.nanoTime()}"
+                    val function = toolCallObj.getAsJsonObject("function")
+                    val toolName = function?.get("name")?.asString ?: continue
+                    val toolArgs = try {
+                        val argStr = function.get("arguments")?.asString ?: "{}"
+                        gson.fromJson(argStr, Map::class.java) as? Map<String, Any> ?: emptyMap()
+                    } catch (e: Exception) {
+                        val rawArgs = function.get("arguments")?.asString?.take(200)
+                        Log.w(TAG, "Failed to parse tool arguments for '$toolName': $rawArgs", e)
+                        null // Signal parse failure
+                    }
+
+                    val result = if (toolArgs == null) {
+                        // Surface parse error to the LLM so it can self-correct
+                        val rawArgs = function.get("arguments")?.asString?.take(200)
+                        ToolResult(false, "Failed to parse arguments for '$toolName'. Fix the JSON and retry. Raw: $rawArgs")
+                    } else {
+                        Log.d(TAG, "Round $round: Executing tool: $toolName with args: $toolArgs")
+                        try {
+                            withTimeoutOrNull(TOOL_EXECUTION_TIMEOUT_MS) {
+                                onToolCall(toolName, toolArgs)
+                            } ?: ToolResult(false, "Tool '$toolName' timed out after ${TOOL_EXECUTION_TIMEOUT_MS / 1000}s")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Tool execution error for $toolName", e)
+                            ToolResult(false, "Tool '$toolName' failed: ${e.message}")
+                        }
+                    }
+
+                    messages.add(JsonObject().apply {
+                        addProperty("role", "tool")
+                        addProperty("tool_call_id", toolCallId)
+                        addProperty("content", gson.toJson(mapOf(
+                            "success" to result.success,
+                            "message" to result.message
+                        )))
+                    })
+                }
+
+                // Loop continues — next iteration sends tool results back to LLM
+            }
+
+            // Exhausted max rounds — ask LLM for final summary without tools
+            Log.w(TAG, "Hit max tool rounds ($MAX_TOOL_ROUNDS), requesting final response")
+            val finalResponse = makeOpenAIRequest(messages, null, apiKey, context)
+            if (finalResponse != null) {
+                val finalJson = JsonParser.parseString(finalResponse).asJsonObject
+                val finalText = finalJson.getAsJsonArray("choices")
+                    ?.get(0)?.asJsonObject
+                    ?.getAsJsonObject("message")
+                    ?.get("content")?.asString ?: ""
                 onResponse(finalText)
-                return
+            } else {
+                onError("Failed to get final response after $MAX_TOOL_ROUNDS tool rounds")
             }
-
-            // Execute tool calls and collect results paired with their IDs
-            val assistantMessage = choice!!.getAsJsonObject("message")
-            val toolCallArray = assistantMessage.getAsJsonArray("tool_calls")
-
-            messages.add(assistantMessage)
-
-            for (i in 0 until (toolCallArray?.size() ?: 0)) {
-                val toolCallObj = toolCallArray!!.get(i).asJsonObject
-                val toolCallId = toolCallObj.get("id")?.asString ?: "tc_${System.nanoTime()}"
-                val function = toolCallObj.getAsJsonObject("function")
-                val toolName = function?.get("name")?.asString ?: continue
-                val toolArgs = try {
-                    val argStr = function.get("arguments")?.asString ?: "{}"
-                    gson.fromJson(argStr, Map::class.java) as? Map<String, Any> ?: emptyMap()
-                } catch (e: Exception) { emptyMap<String, Any>() }
-
-                Log.d(TAG, "Executing tool: $toolName with args: $toolArgs")
-                val result = onToolCall(toolName, toolArgs)
-
-                // OpenAI expects role=tool with matching tool_call_id
-                messages.add(JsonObject().apply {
-                    addProperty("role", "tool")
-                    addProperty("tool_call_id", toolCallId)
-                    addProperty("content", gson.toJson(mapOf(
-                        "success" to result.success,
-                        "message" to result.message
-                    )))
-                })
-            }
-
-            // Second request: send tool results, get final response
-            val finalResponse = makeOpenAIRequest(
-                messages,
-                null, // Don't include tools in second request
-                apiKey,
-                context
-            )
-
-            if (finalResponse == null) {
-                onError("OpenAI final response failed")
-                return
-            }
-
-            val finalJson = JsonParser.parseString(finalResponse).asJsonObject
-            val finalText = finalJson.getAsJsonArray("choices")
-                ?.get(0)?.asJsonObject
-                ?.getAsJsonObject("message")
-                ?.get("content")?.asString ?: ""
-
-            CloudConfig.trackOpenAiTokens(
-                context,
-                finalJson.getAsJsonObject("usage")?.get("total_tokens")?.asInt ?: 0
-            )
-
-            onResponse(finalText)
         } catch (e: Exception) {
             Log.e(TAG, "OpenAI tool execution error", e)
             onError(e.message ?: "OpenAI error")
@@ -242,21 +308,45 @@ Be brief in your responses. Use casual language. Keep confirmations to 1-2 sente
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        try {
-            val response = client.newCall(request).executeSuspend()
-            val responseBody = response.body?.string()
-            response.close()
+        executeWithRetry(request, "OpenAI")
+    }
 
-            if (!response.isSuccessful) {
-                Log.e(TAG, "OpenAI request failed: ${response.code} - $responseBody")
-                return@withContext null
+    /**
+     * Execute an HTTP request with exponential backoff retry for transient failures.
+     * Retries on 429 (rate limit), 500, 502, 503 (server errors), and network exceptions.
+     */
+    private suspend fun executeWithRetry(request: Request, tag: String): String? {
+        var lastException: Exception? = null
+        for (attempt in 0 until MAX_RETRIES) {
+            try {
+                val response = client.newCall(request).executeSuspend()
+                val responseBody = response.body?.string()
+                response.close()
+
+                if (response.isSuccessful) return responseBody
+
+                val code = response.code
+                // Don't retry client errors (400, 401, 403, 404) — only server/rate-limit errors
+                if (code !in listOf(429, 500, 502, 503)) {
+                    Log.e(TAG, "$tag request failed: $code - $responseBody")
+                    return null
+                }
+
+                Log.w(TAG, "$tag transient error $code (attempt ${attempt + 1}/$MAX_RETRIES), retrying...")
+            } catch (e: Exception) {
+                lastException = e
+                Log.w(TAG, "$tag network error (attempt ${attempt + 1}/$MAX_RETRIES): ${e.message}")
             }
 
-            responseBody
-        } catch (e: Exception) {
-            Log.e(TAG, "OpenAI request error", e)
-            null
+            // Exponential backoff: 1s, 2s, 4s
+            if (attempt < MAX_RETRIES - 1) {
+                val delayMs = INITIAL_RETRY_DELAY_MS * (1L shl attempt)
+                kotlinx.coroutines.delay(delayMs)
+            }
         }
+
+        Log.e(TAG, "$tag failed after $MAX_RETRIES attempts", lastException)
+        return null
     }
 
     private fun buildOpenAITools(definitions: List<ToolDefinition>): JsonArray {
@@ -323,6 +413,7 @@ Be brief in your responses. Use casual language. Keep confirmations to 1-2 sente
         userMessage: String,
         toolDefinitions: List<ToolDefinition>,
         context: Context,
+        conversationHistory: List<Pair<String, String>> = emptyList(),
         onToolCall: suspend (String, Map<String, Any>) -> ToolResult,
         onResponse: (String) -> Unit,
         onError: (String) -> Unit
@@ -335,109 +426,130 @@ Be brief in your responses. Use casual language. Keep confirmations to 1-2 sente
         }
 
         val contents = mutableListOf(
+            // System instruction as first user/model turn (Gemini has no system role)
             JsonObject().apply {
                 addProperty("role", "user")
                 add("parts", JsonArray().apply {
                     add(JsonObject().apply {
-                        addProperty("text", userMessage)
+                        addProperty("text", "[System instruction] $AUTOMATION_SYSTEM_PROMPT")
+                    })
+                })
+            },
+            JsonObject().apply {
+                addProperty("role", "model")
+                add("parts", JsonArray().apply {
+                    add(JsonObject().apply {
+                        addProperty("text", "Understood. I'm Nova. Ready to execute.")
                     })
                 })
             }
         )
+        // Add conversation history for context
+        for ((role, content) in conversationHistory) {
+            contents.add(JsonObject().apply {
+                addProperty("role", if (role == "user") "user" else "model")
+                add("parts", JsonArray().apply {
+                    add(JsonObject().apply {
+                        addProperty("text", content)
+                    })
+                })
+            })
+        }
+        // Actual user request
+        contents.add(JsonObject().apply {
+            addProperty("role", "user")
+            add("parts", JsonArray().apply {
+                add(JsonObject().apply {
+                    addProperty("text", userMessage)
+                })
+            })
+        })
 
         val tools = buildGeminiTools(toolDefinitions)
 
         try {
-            // First request: send message + tools
-            val initialResponse = makeGeminiRequest(
-                contents,
-                tools,
-                apiKey
-            )
+            // Multi-step agentic loop — same as OpenAI, keep calling tools until text response
+            var round = 0
+            while (round < MAX_TOOL_ROUNDS) {
+                round++
+                Log.d(TAG, "Gemini tool round $round/$MAX_TOOL_ROUNDS")
 
-            if (initialResponse == null) {
-                onError("Gemini request failed")
-                return
-            }
+                val response = makeGeminiRequest(contents, tools, apiKey)
+                if (response == null) {
+                    onError("Gemini request failed (round $round)")
+                    return
+                }
 
-            val responseJson = JsonParser.parseString(initialResponse).asJsonObject
-            val candidates = responseJson.getAsJsonArray("candidates")
-            if (candidates == null || candidates.size() == 0) {
-                onError("Gemini returned no candidates")
-                return
-            }
+                val responseJson = JsonParser.parseString(response).asJsonObject
+                val candidates = responseJson.getAsJsonArray("candidates")
+                if (candidates == null || candidates.size() == 0) {
+                    onError("Gemini returned no candidates (round $round)")
+                    return
+                }
 
-            val candidate = candidates.get(0).asJsonObject
-            val parts = candidate.getAsJsonObject("content")?.getAsJsonArray("parts")
+                val candidate = candidates.get(0).asJsonObject
+                val parts = candidate.getAsJsonObject("content")?.getAsJsonArray("parts")
 
-            // Check if Gemini wants to call functions
-            val functionCalls = parseGeminiFunctionCalls(parts)
+                val functionCalls = parseGeminiFunctionCalls(parts)
 
-            if (functionCalls.isEmpty()) {
-                // No function calls, just return the text response
-                val finalText = extractGeminiTextResponse(parts) ?: ""
-                onResponse(finalText)
-                return
-            }
+                if (functionCalls.isEmpty()) {
+                    val finalText = extractGeminiTextResponse(parts) ?: ""
+                    onResponse(finalText)
+                    return
+                }
 
-            // Execute function calls
-            val toolResults = mutableListOf<JsonObject>()
-            for ((functionName, functionArgs) in functionCalls) {
-                Log.d(TAG, "Executing Gemini function: $functionName with args: $functionArgs")
-                val result = onToolCall(functionName, functionArgs)
-                toolResults.add(JsonObject().apply {
-                    addProperty("role", "function")
-                    add("parts", JsonArray().apply {
-                        add(JsonObject().apply {
-                            add("functionResponse", JsonObject().apply {
-                                addProperty("name", functionName)
-                                add("response", JsonObject().apply {
-                                    addProperty("success", result.success)
-                                    addProperty("message", result.message)
-                                    if (result.data != null) {
-                                        add("data", gson.toJsonTree(result.data))
-                                    }
+                // Execute function calls with try-catch + timeout
+                val toolResults = mutableListOf<JsonObject>()
+                for ((functionName, functionArgs) in functionCalls) {
+                    Log.d(TAG, "Gemini round $round: Executing function: $functionName")
+                    val result = try {
+                        withTimeoutOrNull(TOOL_EXECUTION_TIMEOUT_MS) {
+                            onToolCall(functionName, functionArgs)
+                        } ?: ToolResult(false, "Tool '$functionName' timed out")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Tool execution error for $functionName", e)
+                        ToolResult(false, "Tool '$functionName' failed: ${e.message}")
+                    }
+
+                    toolResults.add(JsonObject().apply {
+                        addProperty("role", "function")
+                        add("parts", JsonArray().apply {
+                            add(JsonObject().apply {
+                                add("functionResponse", JsonObject().apply {
+                                    addProperty("name", functionName)
+                                    add("response", JsonObject().apply {
+                                        addProperty("success", result.success)
+                                        addProperty("message", result.message)
+                                    })
                                 })
                             })
                         })
                     })
+                }
+
+                // Add model response + tool results to conversation for next round
+                contents.add(JsonObject().apply {
+                    addProperty("role", "model")
+                    add("parts", parts!!)
                 })
+                contents.addAll(toolResults)
+                // Loop continues — next iteration sends results back to Gemini
             }
 
-            // Add assistant response with function calls
-            contents.add(JsonObject().apply {
-                addProperty("role", "model")
-                add("parts", parts!!)
-            })
-
-            // Add tool results
-            contents.addAll(toolResults)
-
-            // Second request: send tool results, get final response
-            val finalResponse = makeGeminiRequest(
-                contents,
-                null, // Don't include tools in second request
-                apiKey
-            )
-
-            if (finalResponse == null) {
-                onError("Gemini final response failed")
-                return
+            // Exhausted max rounds — request final response without tools
+            Log.w(TAG, "Gemini hit max tool rounds ($MAX_TOOL_ROUNDS), requesting final response")
+            val finalResponse = makeGeminiRequest(contents, null, apiKey)
+            if (finalResponse != null) {
+                val finalJson = JsonParser.parseString(finalResponse).asJsonObject
+                val finalParts = finalJson.getAsJsonArray("candidates")
+                    ?.get(0)?.asJsonObject
+                    ?.getAsJsonObject("content")
+                    ?.getAsJsonArray("parts")
+                val finalText = extractGeminiTextResponse(finalParts) ?: ""
+                onResponse(finalText)
+            } else {
+                onError("Gemini failed to get final response after $MAX_TOOL_ROUNDS rounds")
             }
-
-            val finalJson = JsonParser.parseString(finalResponse).asJsonObject
-            val finalCandidates = finalJson.getAsJsonArray("candidates")
-            if (finalCandidates == null || finalCandidates.size() == 0) {
-                onError("Gemini returned no final response")
-                return
-            }
-
-            val finalParts = finalCandidates.get(0).asJsonObject
-                .getAsJsonObject("content")
-                .getAsJsonArray("parts")
-
-            val finalText = extractGeminiTextResponse(finalParts) ?: ""
-            onResponse(finalText)
         } catch (e: Exception) {
             Log.e(TAG, "Gemini tool execution error", e)
             onError(e.message ?: "Gemini error")
@@ -470,59 +582,40 @@ Be brief in your responses. Use casual language. Keep confirmations to 1-2 sente
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        try {
-            val response = client.newCall(request).executeSuspend()
-            val responseBody = response.body?.string()
-            response.close()
-
-            if (!response.isSuccessful) {
-                Log.e(TAG, "Gemini request failed: ${response.code} - $responseBody")
-                return@withContext null
-            }
-
-            responseBody
-        } catch (e: Exception) {
-            Log.e(TAG, "Gemini request error", e)
-            null
-        }
+        executeWithRetry(request, "Gemini")
     }
 
     private fun buildGeminiTools(definitions: List<ToolDefinition>): JsonArray {
-        return JsonArray().apply {
-            add(JsonObject().apply {
-                addProperty("googleSearch", JsonObject().toString()) // Gemini web search
-            })
-            for (def in definitions) {
-                add(JsonObject().apply {
-                    add("functionDeclarations", JsonArray().apply {
-                        add(JsonObject().apply {
-                            addProperty("name", def.name)
-                            addProperty("description", def.description)
-                            add("parameters", JsonObject().apply {
-                                addProperty("type", "OBJECT")
-                                add("properties", JsonObject().apply {
-                                    for ((paramName, paramDef) in def.parameters) {
-                                        add(paramName, JsonObject().apply {
-                                            addProperty(
-                                                "type",
-                                                paramDef.type.uppercase()
-                                            )
-                                            addProperty("description", paramDef.description)
-                                        })
-                                    }
-                                })
-                                add("required", JsonArray().apply {
-                                    for ((paramName, paramDef) in def.parameters) {
-                                        if (paramDef.required) {
-                                            add(paramName)
-                                        }
-                                    }
-                                })
+        // Gemini expects: [{"functionDeclarations": [func1, func2, ...]}]
+        // All functions go in ONE functionDeclarations array inside ONE tool object
+        val functionDeclarations = JsonArray()
+        for (def in definitions) {
+            functionDeclarations.add(JsonObject().apply {
+                addProperty("name", def.name)
+                addProperty("description", def.description)
+                add("parameters", JsonObject().apply {
+                    addProperty("type", "OBJECT")
+                    add("properties", JsonObject().apply {
+                        for ((paramName, paramDef) in def.parameters) {
+                            add(paramName, JsonObject().apply {
+                                addProperty("type", paramDef.type.uppercase())
+                                addProperty("description", paramDef.description)
                             })
-                        })
+                        }
+                    })
+                    add("required", JsonArray().apply {
+                        for ((paramName, paramDef) in def.parameters) {
+                            if (paramDef.required) add(paramName)
+                        }
                     })
                 })
-            }
+            })
+        }
+
+        return JsonArray().apply {
+            add(JsonObject().apply {
+                add("functionDeclarations", functionDeclarations)
+            })
         }
     }
 

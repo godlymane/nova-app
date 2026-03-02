@@ -10,116 +10,161 @@ object UIAutomator {
         val service = NovaAccessibilityService.instance ?: return false
         val root = service.getRootNode() ?: return false
 
-        val clickable = NodeFinder.findClickableByText(root, text)
-        if (clickable != null) {
-            return clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        }
+        try {
+            val clickable = NodeFinder.findClickableByText(root, text)
+            if (clickable != null) {
+                return clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
 
-        val textNodes = NodeFinder.findByText(root, text)
-        if (textNodes.isNotEmpty()) {
-            val node = textNodes.first()
-            val rect = android.graphics.Rect()
-            node.getBoundsInScreen(rect)
-            val x = rect.centerX().toFloat()
-            val y = rect.centerY().toFloat()
-            return service.tapAtCoordinates(x, y)
-        }
+            val textNodes = NodeFinder.findByText(root, text)
+            if (textNodes.isNotEmpty()) {
+                val node = textNodes.first()
+                val rect = android.graphics.Rect()
+                node.getBoundsInScreen(rect)
+                val x = rect.centerX().toFloat()
+                val y = rect.centerY().toFloat()
+                return service.tapAtCoordinates(x, y)
+            }
 
-        return false
+            return false
+        } finally {
+            root.recycle()
+        }
+    }
+
+    suspend fun tapByResourceId(resourceId: String): Boolean {
+        val service = NovaAccessibilityService.instance ?: return false
+        val root = service.getRootNode() ?: return false
+
+        try {
+            val nodes = mutableListOf<AccessibilityNodeInfo>()
+            NodeFinder.traverseTree(root) { node ->
+                if (node.viewIdResourceName == resourceId) nodes.add(node)
+            }
+            for (node in nodes) {
+                if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                var parent = node.parent
+                var depth = 0
+                while (parent != null && depth < 4) {
+                    if (parent.isClickable && parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                    parent = parent.parent
+                    depth++
+                }
+            }
+            return false
+        } finally {
+            root.recycle()
+        }
     }
 
     suspend fun tapByDescription(description: String): Boolean {
         val service = NovaAccessibilityService.instance ?: return false
         val root = service.getRootNode() ?: return false
 
-        val nodes = NodeFinder.findByContentDescription(root, description)
-        for (node in nodes) {
-            if (node.isClickable) {
-                return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            }
-            var parent = node.parent
-            var depth = 0
-            while (parent != null && depth < 5) {
-                if (parent.isClickable) {
-                    return parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        try {
+            val nodes = NodeFinder.findByContentDescription(root, description)
+            for (node in nodes) {
+                if (node.isClickable) {
+                    return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 }
-                parent = parent.parent
-                depth++
+                var parent = node.parent
+                var depth = 0
+                while (parent != null && depth < 5) {
+                    if (parent.isClickable) {
+                        return parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    }
+                    parent = parent.parent
+                    depth++
+                }
+                val rect = android.graphics.Rect()
+                node.getBoundsInScreen(rect)
+                return service.tapAtCoordinates(rect.centerX().toFloat(), rect.centerY().toFloat())
             }
-            val rect = android.graphics.Rect()
-            node.getBoundsInScreen(rect)
-            return service.tapAtCoordinates(rect.centerX().toFloat(), rect.centerY().toFloat())
+            return false
+        } finally {
+            root.recycle()
         }
-        return false
     }
 
     suspend fun typeText(text: String, clearFirst: Boolean = false): Boolean {
         val service = NovaAccessibilityService.instance ?: return false
         val root = service.getRootNode() ?: return false
 
-        val target = findFocusedEditField(root) ?: NodeFinder.findFirstEditField(root) ?: return false
+        try {
+            val target = findFocusedEditField(root) ?: NodeFinder.findFirstEditField(root) ?: return false
 
-        target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        delay(200)
+            target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            delay(200)
 
-        if (clearFirst) {
-            val selectArgs = Bundle().apply {
-                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
-                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, target.text?.length ?: 0)
+            if (clearFirst) {
+                val selectArgs = Bundle().apply {
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, target.text?.length ?: 0)
+                }
+                target.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selectArgs)
             }
-            target.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selectArgs)
-        }
 
-        val args = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            val args = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            }
+            return target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        } finally {
+            root.recycle()
         }
-        return target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
     suspend fun typeTextByLabel(label: String, text: String): Boolean {
         val service = NovaAccessibilityService.instance ?: return false
         val root = service.getRootNode() ?: return false
 
-        val editField = NodeFinder.findEditFieldByLabel(root, label) ?: return false
-        editField.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        editField.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        delay(200)
+        try {
+            val editField = NodeFinder.findEditFieldByLabel(root, label) ?: return false
+            editField.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            editField.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            delay(200)
 
-        val args = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            val args = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            }
+            return editField.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        } finally {
+            root.recycle()
         }
-        return editField.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
     suspend fun scroll(direction: String): Boolean {
         val service = NovaAccessibilityService.instance ?: return false
         val root = service.getRootNode() ?: return false
 
-        val scrollable = NodeFinder.findScrollableNode(root)
+        try {
+            val scrollable = NodeFinder.findScrollableNode(root)
 
-        if (scrollable != null) {
-            val action = when (direction.lowercase()) {
-                "down", "forward" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-                "up", "backward" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-                else -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            if (scrollable != null) {
+                val action = when (direction.lowercase()) {
+                    "down", "forward" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                    "up", "backward" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                    else -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                }
+                val result = scrollable.performAction(action)
+                if (result) return true
             }
-            val result = scrollable.performAction(action)
-            if (result) return true
-        }
 
-        val displayMetrics = service.resources.displayMetrics
-        val screenWidth = displayMetrics.widthPixels.toFloat()
-        val screenHeight = displayMetrics.heightPixels.toFloat()
-        val centerX = screenWidth / 2
-        val margin = screenHeight * 0.2f
+            val displayMetrics = service.resources.displayMetrics
+            val screenWidth = displayMetrics.widthPixels.toFloat()
+            val screenHeight = displayMetrics.heightPixels.toFloat()
+            val centerX = screenWidth / 2
+            val margin = screenHeight * 0.2f
 
-        return when (direction.lowercase()) {
-            "down", "forward" -> service.swipe(centerX, screenHeight - margin, centerX, margin, 400)
-            "up", "backward" -> service.swipe(centerX, margin, centerX, screenHeight - margin, 400)
-            "left" -> service.swipe(screenWidth - margin, screenHeight / 2, margin, screenHeight / 2, 400)
-            "right" -> service.swipe(margin, screenHeight / 2, screenWidth - margin, screenHeight / 2, 400)
-            else -> false
+            return when (direction.lowercase()) {
+                "down", "forward" -> service.swipe(centerX, screenHeight - margin, centerX, margin, 400)
+                "up", "backward" -> service.swipe(centerX, margin, centerX, screenHeight - margin, 400)
+                "left" -> service.swipe(screenWidth - margin, screenHeight / 2, margin, screenHeight / 2, 400)
+                "right" -> service.swipe(margin, screenHeight / 2, screenWidth - margin, screenHeight / 2, 400)
+                else -> false
+            }
+        } finally {
+            root.recycle()
         }
     }
 
@@ -129,8 +174,12 @@ object UIAutomator {
             val service = NovaAccessibilityService.instance ?: return false
             val root = service.getRootNode()
             if (root != null) {
-                val nodes = NodeFinder.findByText(root, text)
-                if (nodes.isNotEmpty()) return true
+                try {
+                    val nodes = NodeFinder.findByText(root, text)
+                    if (nodes.isNotEmpty()) return true
+                } finally {
+                    root.recycle()
+                }
             }
             delay(pollIntervalMs)
         }

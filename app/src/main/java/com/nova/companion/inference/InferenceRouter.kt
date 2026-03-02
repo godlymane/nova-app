@@ -294,7 +294,7 @@ object InferenceRouter {
             })
         }
 
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?key=$apiKey&alt=sse"
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?key=$apiKey&alt=sse"
 
         val request = Request.Builder()
             .url(url)
@@ -353,7 +353,7 @@ object InferenceRouter {
         })
 
         val requestBody = JsonObject().apply {
-            addProperty("model", "claude-3-5-sonnet-20241022")
+            addProperty("model", "claude-sonnet-4-20250514")
             addProperty("max_tokens", 512)
             addProperty("system", systemPrompt)
             add("messages", messages)

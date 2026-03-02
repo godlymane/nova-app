@@ -1,5 +1,6 @@
 package com.nova.companion.voice
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -65,6 +66,9 @@ class WakeWordService : Service() {
         // Broadcast action emitted on wake word detection
         const val ACTION_WAKE_WORD_DETECTED = "com.nova.companion.WAKE_WORD_DETECTED"
 
+        // Extra set on MainActivity launch to signal it should start voice immediately
+        const val EXTRA_VOICE_TRIGGER = "wake_word_voice_trigger"
+
         // PendingIntent request code
         private const val PENDING_INTENT_RC = 200
 
@@ -73,6 +77,10 @@ class WakeWordService : Service() {
         // eliminating the IPC round-trip latency.
         private val _wakeWordEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
         val wakeWordEvent: SharedFlow<Unit> = _wakeWordEvent.asSharedFlow()
+
+        // Reference to the running service instance for in-process pause/resume.
+        @Volatile
+        private var instance: WakeWordService? = null
 
         /**
          * Start the wake word service as a foreground service.
@@ -92,6 +100,22 @@ class WakeWordService : Service() {
         fun stop(context: Context) {
             context.stopService(Intent(context, WakeWordService::class.java))
         }
+
+        /**
+         * Pause Porcupine to release the mic so ElevenLabs can open AudioRecord.
+         * Called from ChatViewModel before starting an ElevenLabs voice session.
+         */
+        fun pauseListening() {
+            instance?.pausePorcupine()
+        }
+
+        /**
+         * Resume Porcupine after an ElevenLabs session ends (disconnect/error).
+         * Called from ChatViewModel when ElevenLabs connection state goes DISCONNECTED/ERROR.
+         */
+        fun resumeListening() {
+            instance?.resumePorcupine()
+        }
     }
 
     // ── Internal state ──────────────────────────────────────────
@@ -109,6 +133,7 @@ class WakeWordService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         Log.i(TAG, "WakeWordService created")
         createNotificationChannel()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -124,6 +149,7 @@ class WakeWordService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "WakeWordService destroyed")
+        instance = null
         releasePorcupine()
         abandonAudioFocus()
         serviceScope.cancel()
@@ -196,8 +222,37 @@ class WakeWordService : Service() {
         }
     }
 
+    /**
+     * Pause Porcupine audio processing to release the mic for ElevenLabs.
+     * Porcupine's internal AudioRecord is stopped but not destroyed.
+     */
+    fun pausePorcupine() {
+        try {
+            porcupineManager?.stop()
+            Log.i(TAG, "Porcupine paused — mic released for ElevenLabs")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error pausing Porcupine", e)
+        }
+    }
+
+    /**
+     * Resume Porcupine after ElevenLabs session ends.
+     */
+    fun resumePorcupine() {
+        try {
+            porcupineManager?.start()
+            Log.i(TAG, "Porcupine resumed — listening for 'Hey Nova'")
+            updateNotification("Listening for 'Hey Nova'...")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error resuming Porcupine", e)
+        }
+    }
+
     private fun onWakeWordDetected() {
         Log.i(TAG, "Processing wake word trigger")
+
+        // 0. Pause Porcupine immediately to release mic before ElevenLabs opens AudioRecord
+        pausePorcupine()
 
         // 1. Request audio focus so mic capture is uninterrupted
         requestAudioFocus()
@@ -205,34 +260,47 @@ class WakeWordService : Service() {
         // 2. Vibrate the device — tactile confirmation for the user (100 ms)
         vibrateOnWakeWord()
 
-        // 3. Broadcast intent so any registered BroadcastReceivers can act
+        // 3. If app is in background, bring MainActivity to foreground
+        //    so ElevenLabs voice session gets proper lifecycle + audio routing
+        if (!isAppInForeground()) {
+            Log.i(TAG, "App is in background — bringing MainActivity to foreground for voice")
+            val foregroundIntent = Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                putExtra(EXTRA_VOICE_TRIGGER, true)
+            }
+            startActivity(foregroundIntent)
+        }
 
+        // 4. Broadcast intent so any registered BroadcastReceivers can act
         val broadcastIntent = Intent(ACTION_WAKE_WORD_DETECTED).apply {
             setPackage(packageName)
         }
         sendBroadcast(broadcastIntent)
 
-        // 4. Emit event for ChatViewModel (no BroadcastReceiver overhead)
+        // 5. Emit event for ChatViewModel (no BroadcastReceiver overhead)
+        // ChatViewModel collects this event and handles starting the voice session.
+        // Do NOT also call ActiveVoiceManagerHolder directly — that causes a
+        // double voice-session race condition where two ElevenLabs connections compete.
         _wakeWordEvent.tryEmit(Unit)
-
-        // 5. If VoiceManager singleton is available (set by ViewModel),
-        //    start listening immediately in-process to avoid broadcast round-trip latency
-
-        val vm = ActiveVoiceManagerHolder.voiceManager
-        if (vm != null) {
-            serviceScope.launch(Dispatchers.Main) {
-                try {
-                    vm.startListening(serviceScope)
-                    Log.i(TAG, "VoiceManager.startListening() triggered by wake word")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error starting listening after wake word", e)
-                }
-            }
-        } else {
-            Log.w(TAG, "VoiceManager not available — wake word broadcast sent but in-process trigger skipped")
-        }
+        Log.i(TAG, "Wake word event emitted — ChatViewModel will handle voice session")
 
         updateNotification("Wake word detected — listening...")
+    }
+
+    /**
+     * Returns true if the Nova app is currently in the foreground (visible to user).
+     */
+    @Suppress("DEPRECATION")
+    private fun isAppInForeground(): Boolean {
+        return try {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val tasks = am.getRunningTasks(1)
+            tasks.isNotEmpty() && tasks[0].topActivity?.packageName == packageName
+        } catch (e: Exception) {
+            false // Assume background if check fails — safe to bring foreground
+        }
     }
 
     // ── Vibration ───────────────────────────────────────────────

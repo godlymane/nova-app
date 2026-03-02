@@ -4,8 +4,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import com.google.gson.Gson
@@ -42,6 +45,8 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 
 /**
  * ElevenLabs Conversational AI Voice Service
@@ -63,7 +68,6 @@ import kotlin.coroutines.resumeWithException
 object ElevenLabsVoiceService {
 
     private const val TAG = "ElevenLabsVoice"
-    private const val AGENT_ID = "agent_1001kjg9ge5cem"
     private const val WEBSOCKET_URL = "wss://api.elevenlabs.io/v1/convai/conversation"
 
     // Audio configuration
@@ -146,14 +150,50 @@ object ElevenLabsVoiceService {
     private var reconnectAttempts = 0
     private val gson = Gson()
 
+    // System prompt override — injected via conversation_initiation_client_data on connect
+    private var pendingSystemPromptOverride: String? = null
+
+    // Client tool definitions — sent to ElevenLabs agent so it knows what tools to call
+    private var pendingClientTools: List<ClientToolDef>? = null
+
+    // Persisted copies for reconnect — not cleared after use
+    private var lastSystemPrompt: String? = null
+    private var lastClientTools: List<ClientToolDef>? = null
+
+    /**
+     * Lightweight definition of a client tool to send to ElevenLabs agent.
+     */
+    data class ClientToolDef(
+        val name: String,
+        val description: String,
+        val parameters: Map<String, ToolParamDef>
+    )
+
+    data class ToolParamDef(
+        val type: String,
+        val description: String,
+        val required: Boolean = true
+    )
+
     // Audio playback queue
     private val audioQueue = ConcurrentLinkedQueue<ByteArray>()
     private var isPlaybackRunning = false
+
+    // Echo cancellation
+    private var acousticEchoCanceler: AcousticEchoCanceler? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+
+    // Shared audio session — AudioRecord + AudioTrack MUST share the same session for AEC to work
+    private var sharedAudioSessionId: Int = AudioManager.AUDIO_SESSION_ID_GENERATE
+
+    // Minimum RMS energy threshold to send mic audio — filters ambient noise
+    private const val MIC_ENERGY_THRESHOLD = 150  // ~quiet speech floor; silence/ambient ~30-80
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS) // No timeout for streaming
         .writeTimeout(10, TimeUnit.SECONDS)
+        .pingInterval(20, TimeUnit.SECONDS) // WebSocket-level ping/pong (not application-level)
         .build()
 
     private val coroutineScope = kotlinx.coroutines.CoroutineScope(
@@ -172,9 +212,20 @@ object ElevenLabsVoiceService {
      * Connect to ElevenLabs Conversational AI WebSocket.
      * Initializes microphone recording and audio playback.
      *
+     * @param systemPromptOverride Optional context injected via conversation_initiation_client_data.
+     *   Sent immediately on connection open — does NOT trigger a spoken response.
+     * @param clientTools Optional list of client tool definitions to register with the agent.
      * @return true if connection initiated successfully
      */
-    suspend fun connect(): Boolean = withContext(Dispatchers.IO) {
+    suspend fun connect(
+        systemPromptOverride: String? = null,
+        clientTools: List<ClientToolDef>? = null
+    ): Boolean = withContext(Dispatchers.IO) {
+        pendingSystemPromptOverride = systemPromptOverride
+        pendingClientTools = clientTools
+        // Persist for reconnect
+        if (systemPromptOverride != null) lastSystemPrompt = systemPromptOverride
+        if (clientTools != null) lastClientTools = clientTools
         if (_connectionState.value == ConnectionState.CONNECTED ||
             _connectionState.value == ConnectionState.CONNECTING
         ) {
@@ -200,10 +251,10 @@ object ElevenLabsVoiceService {
             }
 
             // Connect WebSocket
-            val wsUrl = "$WEBSOCKET_URL?agent_id=$AGENT_ID"
+            val wsUrl = "$WEBSOCKET_URL?agent_id=${BuildConfig.ELEVENLABS_AGENT_ID}"
             val request = Request.Builder()
                 .url(wsUrl)
-                .addHeader("Authorization", "Bearer ${BuildConfig.ELEVENLABS_API_KEY}")
+                .addHeader("xi-api-key", BuildConfig.ELEVENLABS_API_KEY.trim())
                 .build()
 
             webSocket = httpClient.newWebSocket(request, createWebSocketListener())
@@ -228,9 +279,6 @@ object ElevenLabsVoiceService {
 
                 // Start microphone recording
                 startMicrophoneCapture()
-
-                // Start ping/pong for keepalive
-                startPingKeepAlive()
 
                 true
             } else {
@@ -259,6 +307,10 @@ object ElevenLabsVoiceService {
         recordingJob?.cancel()
         playbackJob?.cancel()
         pingJob?.cancel()
+
+        // Clear persisted context on intentional disconnect
+        lastSystemPrompt = null
+        lastClientTools = null
 
         audioQueue.clear()
         isPlaybackRunning = false
@@ -303,24 +355,63 @@ object ElevenLabsVoiceService {
     }
 
     /**
-     * Send contextual information to the ElevenLabs agent after connection.
-     * This injects memory, time, and conversation history into the current session.
-     * Sent as a text message the agent processes silently for conversation continuity.
+     * Send conversation_initiation_client_data to register client tools with the agent.
+     * The system prompt is configured in the ElevenLabs dashboard (prompt override
+     * is disabled in agent config, sending it causes code 1008 disconnection).
+     * Must be called immediately after onOpen, before audio streaming starts.
      */
-    fun sendContextMessage(context: String) {
-        if (_connectionState.value != ConnectionState.CONNECTED || context.isBlank()) {
-            Log.w(TAG, "Cannot send context: not connected or empty context")
-            return
+    private fun sendInitiationOverride(systemPrompt: String) {
+        val agentConfig = JsonObject()
+
+        // NOTE: Prompt override is disabled in the ElevenLabs agent config.
+        // Do NOT send prompt override — it causes WebSocket close with code 1008:
+        // "Override for field 'prompt' is not allowed by config."
+        // The system prompt must be configured on the ElevenLabs dashboard.
+
+        // Add client tools if available
+        val tools = pendingClientTools
+        if (!tools.isNullOrEmpty()) {
+            val toolsArray = com.google.gson.JsonArray()
+            for (tool in tools) {
+                val toolJson = JsonObject().apply {
+                    addProperty("type", "client")
+                    addProperty("name", tool.name)
+                    addProperty("description", tool.description)
+                    add("parameters", JsonObject().apply {
+                        addProperty("type", "object")
+                        val props = JsonObject()
+                        val reqArr = com.google.gson.JsonArray()
+                        tool.parameters.forEach { (pName, pDef) ->
+                            props.add(pName, JsonObject().apply {
+                                addProperty("type", pDef.type)
+                                addProperty("description", pDef.description)
+                            })
+                            if (pDef.required) reqArr.add(pName)
+                        }
+                        add("properties", props)
+                        add("required", reqArr)
+                    })
+                }
+                toolsArray.add(toolJson)
+            }
+            agentConfig.add("tools", toolsArray)
+            Log.i(TAG, "Registered ${tools.size} client tools with ElevenLabs agent")
         }
 
-        val contextPrompt = "[SYSTEM CONTEXT - Do not read this aloud, just absorb it silently for conversation continuity]\n$context"
-
-        val message = JsonObject().apply {
-            addProperty("type", "user_message")
-            addProperty("text", contextPrompt)
+        // Only send initiation data if we have tools to register
+        if (agentConfig.size() > 0) {
+            val message = JsonObject().apply {
+                addProperty("type", "conversation_initiation_client_data")
+                add("conversation_config_override", JsonObject().apply {
+                    add("agent", agentConfig)
+                })
+            }
+            webSocket?.send(message.toString())
+            Log.i(TAG, "Initiation data sent (tools only, no prompt override)")
         }
-        webSocket?.send(message.toString())
-        Log.i(TAG, "Context injected (${context.length} chars)")
+
+        // Clear pending (one-shot) but keep lastClientTools for reconnect
+        pendingClientTools = null
     }
 
     /**
@@ -390,7 +481,7 @@ object ElevenLabsVoiceService {
             }
 
             audioRecord = android.media.AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION, // Enables AEC on hardware
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
@@ -404,7 +495,21 @@ object ElevenLabsVoiceService {
                 return false
             }
 
-            Log.i(TAG, "AudioRecord initialized: $SAMPLE_RATE Hz, buffer=$bufferSize")
+            // Grab session ID so AudioTrack can share it — critical for AEC
+            sharedAudioSessionId = audioRecord!!.audioSessionId
+
+            // Enable Acoustic Echo Canceler to prevent Nova hearing herself
+            if (AcousticEchoCanceler.isAvailable()) {
+                acousticEchoCanceler = AcousticEchoCanceler.create(sharedAudioSessionId)
+                acousticEchoCanceler?.enabled = true
+                Log.i(TAG, "AcousticEchoCanceler enabled (session=$sharedAudioSessionId)")
+            }
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(sharedAudioSessionId)
+                noiseSuppressor?.enabled = true
+            }
+
+            Log.i(TAG, "AudioRecord initialized: $SAMPLE_RATE Hz, buffer=$bufferSize, session=$sharedAudioSessionId, AEC=${AcousticEchoCanceler.isAvailable()}")
             true
         } catch (e: SecurityException) {
             Log.e(TAG, "Microphone permission denied", e)
@@ -429,7 +534,7 @@ object ElevenLabsVoiceService {
             audioTrack = AudioTrack(
                 AudioAttributes.Builder()
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION) // Pairs with VOICE_COMMUNICATION source for AEC
                     .build(),
                 AudioFormat.Builder()
                     .setEncoding(AUDIO_FORMAT)
@@ -438,10 +543,10 @@ object ElevenLabsVoiceService {
                     .build(),
                 bufferSize,
                 AudioTrack.MODE_STREAM,
-                android.media.AudioManager.AUDIO_SESSION_ID_GENERATE
+                sharedAudioSessionId // MUST share session with AudioRecord for AEC to cancel playback from mic
             )
 
-            Log.i(TAG, "AudioTrack initialized: $SAMPLE_RATE Hz, buffer=$bufferSize")
+            Log.i(TAG, "AudioTrack initialized: $SAMPLE_RATE Hz, buffer=$bufferSize, session=$sharedAudioSessionId (shared with AudioRecord)")
             true
         } catch (e: Exception) {
             Log.e(TAG, "AudioTrack initialization error", e)
@@ -451,6 +556,10 @@ object ElevenLabsVoiceService {
 
     private fun stopAudioRecord() {
         try {
+            acousticEchoCanceler?.release()
+            acousticEchoCanceler = null
+            noiseSuppressor?.release()
+            noiseSuppressor = null
             audioRecord?.let {
                 if (it.recordingState == android.media.AudioRecord.RECORDSTATE_RECORDING) {
                     it.stop()
@@ -493,6 +602,19 @@ object ElevenLabsVoiceService {
                     val readCount = audioRecord?.read(buffer, 0, buffer.size) ?: -1
 
                     if (readCount > 0) {
+                        // Calculate RMS energy — skip chunk if below noise floor
+                        var sumSquares = 0L
+                        for (i in 0 until readCount) {
+                            sumSquares += buffer[i].toLong() * buffer[i].toLong()
+                        }
+                        val rms = Math.sqrt(sumSquares.toDouble() / readCount).toInt()
+
+                        if (rms < MIC_ENERGY_THRESHOLD) {
+                            // Below noise floor — don't send, avoids ambient noise triggering agent
+                            delay(10)
+                            continue
+                        }
+
                         // Convert 16-bit PCM to base64
                         val pcmBytes = ByteArray(readCount * 2)
                         val byteBuffer = ByteBuffer.wrap(pcmBytes)
@@ -554,15 +676,19 @@ object ElevenLabsVoiceService {
                 audioTrack?.play()
                 _isAgentSpeaking.value = true
 
+                var emptyPollCount = 0
                 while (_connectionState.value == ConnectionState.CONNECTED || audioQueue.isNotEmpty()) {
                     val chunk = audioQueue.poll()
                     if (chunk != null) {
                         audioTrack?.write(chunk, 0, chunk.size, AudioTrack.WRITE_BLOCKING)
+                        emptyPollCount = 0 // Reset on data received
                     } else {
-                        // No data in queue — wait briefly before checking again
-                        delay(10)
-                        // If queue is still empty after a brief wait, agent stopped speaking
-                        if (audioQueue.isEmpty()) {
+                        emptyPollCount++
+                        delay(50) // Wait longer between checks to tolerate network jitter
+                        // Only break after sustained silence (500ms) AND connection is no longer active
+                        if (audioQueue.isEmpty() && (
+                                _connectionState.value != ConnectionState.CONNECTED || emptyPollCount > 10
+                            )) {
                             break
                         }
                     }
@@ -578,21 +704,11 @@ object ElevenLabsVoiceService {
     }
 
     private fun startPingKeepAlive() {
-        if (pingJob?.isActive == true) return
-
-        pingJob = coroutineScope.launch {
-            while (_connectionState.value == ConnectionState.CONNECTED) {
-                try {
-                    delay(PING_INTERVAL_MS)
-                    val ping = JsonObject().apply {
-                        addProperty("type", "ping")
-                    }
-                    webSocket?.send(ping.toString())
-                } catch (e: Exception) {
-                    Log.w(TAG, "Ping error", e)
-                }
-            }
-        }
+        // ElevenLabs server sends its own keepalive pings — we just need to stay alive.
+        // Do NOT send application-level {"type":"ping"} — ElevenLabs rejects unknown messages
+        // with code 1008 "Invalid message received".
+        // OkHttp handles WebSocket-level ping/pong automatically.
+        Log.d(TAG, "Keepalive: relying on server pings + OkHttp WebSocket ping/pong")
     }
 
     // ── Reconnect logic ──────────────────────────────────────────────
@@ -623,11 +739,11 @@ object ElevenLabsVoiceService {
             webSocket = null
             handshakeCompleted = false
 
-            // Reconnect
-            val success = connect()
+            // Reconnect — re-inject the same system prompt + tools from last session
+            val success = connect(lastSystemPrompt, lastClientTools)
             if (success) {
                 reconnectAttempts = 0
-                Log.i(TAG, "Reconnected successfully")
+                Log.i(TAG, "Reconnected successfully with system prompt + tools")
             }
         }
     }
@@ -670,6 +786,12 @@ object ElevenLabsVoiceService {
     private fun createWebSocketListener(): WebSocketListener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             Log.i(TAG, "WebSocket opened")
+            // Inject system prompt + client tools BEFORE handshake completes and audio starts
+            val prompt = pendingSystemPromptOverride
+            if (!prompt.isNullOrBlank() || !pendingClientTools.isNullOrEmpty()) {
+                sendInitiationOverride(prompt ?: "")
+            }
+            pendingSystemPromptOverride = null
             handshakeCompleted = true
             handshakeContinuation?.let { cont ->
                 if (cont.isActive) {
@@ -692,6 +814,19 @@ object ElevenLabsVoiceService {
                     "agent_response" -> handleAgentResponseMessage(json)
                     "user_transcript" -> handleUserTranscriptMessage(json)
                     "client_tool_call" -> handleToolCallMessage(json)
+                    "conversation_initiation_metadata" -> {
+                        val convId = json.getAsJsonObject("conversation_initiation_metadata_event")
+                            ?.get("conversation_id")?.asString
+                        Log.i(TAG, "Conversation started: id=$convId")
+                    }
+                    "interruption" -> {
+                        // Agent was interrupted by user speech — clear audio queue
+                        audioQueue.clear()
+                        Log.d(TAG, "Agent interrupted — audio queue cleared")
+                    }
+                    "ping" -> {
+                        // Server keepalive ping — do NOT respond, ElevenLabs rejects pong as invalid
+                    }
                     "pong" -> {
                         // Pong response
                     }
@@ -775,10 +910,22 @@ object ElevenLabsVoiceService {
 
     private fun handleToolCallMessage(json: JsonObject) {
         try {
-            val toolEvent = json.getAsJsonObject("client_tool_call_event")
-            val toolName = toolEvent.get("tool_name").asString
-            val toolCallId = toolEvent.get("tool_call_id").asString
-            val parametersJson = toolEvent.getAsJsonObject("parameters")
+            // ElevenLabs Conversational AI sends tool call data at the TOP LEVEL
+            // of the JSON message, NOT nested in a sub-object.
+            // Format: {"type":"client_tool_call","tool_name":"...","tool_call_id":"...","parameters":{...}}
+            // Fallback to nested "client_tool_call" key for forward-compatibility.
+            val nested = json.getAsJsonObject("client_tool_call")
+
+            val toolName = json.get("tool_name")?.asString
+                ?: nested?.get("tool_name")?.asString
+                ?: throw IllegalStateException("Missing tool_name in client_tool_call")
+
+            val toolCallId = json.get("tool_call_id")?.asString
+                ?: nested?.get("tool_call_id")?.asString
+                ?: throw IllegalStateException("Missing tool_call_id in client_tool_call")
+
+            val parametersJson = json.getAsJsonObject("parameters")
+                ?: nested?.getAsJsonObject("parameters")
 
             // Convert parameters to Map<String, Any>
             val params = mutableMapOf<String, Any>()
@@ -806,7 +953,7 @@ object ElevenLabsVoiceService {
                     sendToolResult(toolCallId, "No tool handler registered", isError = true)
                 }
         } catch (e: Exception) {
-            Log.e(TAG, "Error handling tool call", e)
+            Log.e(TAG, "Error handling tool call: ${e.message}", e)
         }
     }
 }
