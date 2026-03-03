@@ -22,8 +22,8 @@ object SmartRouter {
     // ── Keyword sets ───────────────────────────────────────────
 
     private val LIVE_DATA_KEYWORDS = setOf(
-        "weather", "news", "price", "today", "latest", "current", "score",
-        "scores", "stock", "stocks", "crypto", "bitcoin", "btc", "eth",
+        "weather", "news", "price", "latest", "score",
+        "scores", "stock", "stocks", "crypto", "bitcoin", "btc",
         "market", "trending", "right now", "happening", "update",
         "who won", "who is winning", "results", "forecast", "temperature",
         "game", "match", "election", "released", "announced",
@@ -53,58 +53,72 @@ object SmartRouter {
     // ── Routing logic ──────────────────────────────────────────
 
     /**
-     * Classify a user message into a route type.
+     * Classify a user message into a route type using a scoring system.
+     * Each keyword set accumulates a score; the highest score wins.
+     * Multi-word phrases score higher (3 pts) than single words (2 pts).
      */
     fun route(message: String): RouteType {
         val lower = message.lowercase().trim()
         val wordCount = lower.split("\\s+".toRegex()).size
 
-        // 1. Check for live data keywords first (highest priority)
-        if (containsAny(lower, LIVE_DATA_KEYWORDS)) {
-            Log.d(TAG, "Route: LIVE_DATA (keyword match) for: ${message.take(50)}...")
-            return RouteType.LIVE_DATA
+        // Calculate scores for each route type
+        var liveDataScore = 0
+        var complexScore = 0
+        var casualScore = 0
+
+        // Score LIVE_DATA keywords
+        for (keyword in LIVE_DATA_KEYWORDS) {
+            if (Regex("\\b${Regex.escape(keyword)}\\b").containsMatchIn(lower)) {
+                liveDataScore += if (keyword.contains(" ")) 3 else 2
+            }
         }
 
-        // 2. Check for complex indicators
-        if (containsAny(lower, COMPLEX_KEYWORDS)) {
-            Log.d(TAG, "Route: COMPLEX (keyword match) for: ${message.take(50)}...")
-            return RouteType.COMPLEX
+        // Score COMPLEX keywords
+        for (keyword in COMPLEX_KEYWORDS) {
+            if (Regex("\\b${Regex.escape(keyword)}\\b").containsMatchIn(lower)) {
+                complexScore += if (keyword.contains(" ")) 3 else 2
+            }
         }
 
-        // 3. Long messages with question marks about non-casual topics -> COMPLEX
-        if (wordCount > 30 && lower.contains("?")) {
-            Log.d(TAG, "Route: COMPLEX (long question) for: ${message.take(50)}...")
-            return RouteType.COMPLEX
+        // Score CASUAL signals
+        for (keyword in CASUAL_SIGNALS) {
+            if (Regex("\\b${Regex.escape(keyword)}\\b").containsMatchIn(lower)) {
+                casualScore += 2
+            }
         }
 
-        // 4. Medium-length messages with question patterns -> COMPLEX
-        if (wordCount > 15 && (lower.startsWith("how") || lower.startsWith("what") ||
-                    lower.startsWith("why") || lower.startsWith("can you"))
-        ) {
-            Log.d(TAG, "Route: COMPLEX (question pattern) for: ${message.take(50)}...")
-            return RouteType.COMPLEX
-        }
+        // Length-based scoring adjustments
+        if (wordCount > 15 && lower.contains("?")) complexScore += 2
+        if (wordCount > 12 && (lower.startsWith("how") || lower.startsWith("what") ||
+                    lower.startsWith("why") || lower.startsWith("can you"))) complexScore += 2
 
-        // 5. Short casual messages -> LOCAL
-        if (wordCount < 30 || containsAny(lower, CASUAL_SIGNALS)) {
-            Log.d(TAG, "Route: CASUAL (short/casual) for: ${message.take(50)}...")
-            return RouteType.CASUAL
-        }
+        // Short casual messages get a bonus
+        if (wordCount < 12) casualScore += 2
 
-        // 6. Default: anything else that's long -> COMPLEX
-        Log.d(TAG, "Route: COMPLEX (default long) for: ${message.take(50)}...")
-        return RouteType.COMPLEX
+        // Log the scores
+        Log.d(TAG, "Route scores — LIVE_DATA=$liveDataScore, COMPLEX=$complexScore, CASUAL=$casualScore for: ${message.take(50)}...")
+
+        // Return highest-scoring route
+        return when {
+            liveDataScore > 0 && liveDataScore >= complexScore && liveDataScore >= casualScore -> {
+                Log.d(TAG, "Route: LIVE_DATA (score=$liveDataScore)")
+                RouteType.LIVE_DATA
+            }
+            complexScore > 0 && complexScore >= casualScore -> {
+                Log.d(TAG, "Route: COMPLEX (score=$complexScore)")
+                RouteType.COMPLEX
+            }
+            else -> {
+                Log.d(TAG, "Route: CASUAL (score=$casualScore, wordCount=$wordCount)")
+                RouteType.CASUAL
+            }
+        }
     }
 
     private fun containsAny(text: String, keywords: Set<String>): Boolean {
         return keywords.any { keyword ->
-            // Plain substring for short/compound words (today's, right now, etc.)
-            if (keyword.length <= 8 || keyword.contains("'") || keyword.contains(" ")) {
-                text.contains(keyword)
-            } else {
-                val pattern = "\\b${Regex.escape(keyword)}\\b"
-                Regex(pattern).containsMatchIn(text)
-            }
+            val pattern = "\\b${Regex.escape(keyword)}\\b"
+            Regex(pattern).containsMatchIn(text)
         }
     }
 }
