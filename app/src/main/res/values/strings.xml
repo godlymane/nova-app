@@ -2,4 +2,5 @@
 <resources>
     <string name="app_name">Nova</string>
     <string name="nova_accessibility_description">Nova uses accessibility to interact with apps on your behalf — tapping buttons, typing text, scrolling, and navigating. This lets Nova complete tasks end-to-end instead of just opening apps.</string>
+    <string name="widget_description">Quick access to Nova — see last response and tap to talk</string>
 </resources>

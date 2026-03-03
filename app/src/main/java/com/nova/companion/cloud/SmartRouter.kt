@@ -26,7 +26,11 @@ object SmartRouter {
         "scores", "stock", "stocks", "crypto", "bitcoin", "btc", "eth",
         "market", "trending", "right now", "happening", "update",
         "who won", "who is winning", "results", "forecast", "temperature",
-        "game", "match", "election", "released", "announced"
+        "game", "match", "election", "released", "announced",
+        // Phase 7: NegotiationEngine-aligned keywords
+        "exchange rate", "convert", "currency", "usd", "inr", "eur",
+        "solana", "dogecoin", "cardano", "coin price",
+        "trivia", "quiz", "headlines", "how much is"
     )
 
     private val COMPLEX_KEYWORDS = setOf(
@@ -94,9 +98,13 @@ object SmartRouter {
 
     private fun containsAny(text: String, keywords: Set<String>): Boolean {
         return keywords.any { keyword ->
-            // Word boundary matching to prevent substring false positives
-            val pattern = "\\b${Regex.escape(keyword)}\\b"
-            Regex(pattern).containsMatchIn(text)
+            // Plain substring for short/compound words (today's, right now, etc.)
+            if (keyword.length <= 8 || keyword.contains("'") || keyword.contains(" ")) {
+                text.contains(keyword)
+            } else {
+                val pattern = "\\b${Regex.escape(keyword)}\\b"
+                Regex(pattern).containsMatchIn(text)
+            }
         }
     }
 }

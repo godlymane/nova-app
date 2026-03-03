@@ -86,6 +86,19 @@ object UIAutomator {
         }
     }
 
+    /**
+     * Tap at percentage-based coordinates.
+     * Converts (xPct, yPct) in [0.0, 1.0] range to pixel coordinates
+     * using the current screen dimensions, then dispatches via accessibility gesture.
+     */
+    suspend fun tapAtPercentage(xPct: Float, yPct: Float): Boolean {
+        val service = NovaAccessibilityService.instance ?: return false
+        val displayMetrics = service.resources.displayMetrics
+        val x = (xPct * displayMetrics.widthPixels).coerceIn(0f, displayMetrics.widthPixels.toFloat())
+        val y = (yPct * displayMetrics.heightPixels).coerceIn(0f, displayMetrics.heightPixels.toFloat())
+        return service.tapAtCoordinates(x, y)
+    }
+
     suspend fun typeText(text: String, clearFirst: Boolean = false): Boolean {
         val service = NovaAccessibilityService.instance ?: return false
         val root = service.getRootNode() ?: return false
@@ -95,7 +108,7 @@ object UIAutomator {
 
             target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
             target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            delay(200)
+            delay(100)
 
             if (clearFirst) {
                 val selectArgs = Bundle().apply {
@@ -122,7 +135,7 @@ object UIAutomator {
             val editField = NodeFinder.findEditFieldByLabel(root, label) ?: return false
             editField.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
             editField.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            delay(200)
+            delay(100)
 
             val args = Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)

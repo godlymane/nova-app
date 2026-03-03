@@ -3,6 +3,8 @@ package com.nova.companion.notification
 import android.content.Context
 import android.util.Log
 import androidx.work.*
+import com.nova.companion.brain.thinking.ThinkingWorker
+import com.nova.companion.memory.EmbeddingBackfillWorker
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
@@ -23,6 +25,9 @@ object NotificationScheduler {
     private const val WORK_NIGHT = "nova_night"
     private const val WORK_INACTIVE = "nova_inactive"
     private const val WORK_SMART_WEEKLY = "nova_smart_weekly"
+    private const val WORK_PROACTIVE = "nova_proactive_context"
+    private const val WORK_THINKING = "nova_thinking_loop"
+    private const val WORK_EMBEDDING_BACKFILL = "nova_embedding_backfill"
 
     /**
      * Schedule all notification workers based on current preferences.
@@ -60,6 +65,15 @@ object NotificationScheduler {
             repeatIntervalHours = 12
         )
 
+        // Context-aware proactive triggers — evaluates every 15 minutes
+        scheduleProactiveWorker(context)
+
+        // Nova's brain — inner monologue every 30 minutes
+        scheduleThinkingWorker(context)
+
+        // One-time: backfill embeddings for existing memories
+        scheduleEmbeddingBackfill(context)
+
         Log.i(TAG, "All notification workers scheduled")
     }
 
@@ -83,6 +97,9 @@ object NotificationScheduler {
         wm.cancelUniqueWork(WORK_NIGHT)
         wm.cancelUniqueWork(WORK_INACTIVE)
         wm.cancelUniqueWork(WORK_SMART_WEEKLY)
+        wm.cancelUniqueWork(WORK_PROACTIVE)
+        wm.cancelUniqueWork(WORK_THINKING)
+        wm.cancelUniqueWork(WORK_EMBEDDING_BACKFILL)
         Log.i(TAG, "All notification workers cancelled")
     }
 
@@ -157,6 +174,84 @@ object NotificationScheduler {
         )
 
         Log.d(TAG, "Scheduled $uniqueWorkName every ${repeatIntervalHours}h")
+    }
+
+    /**
+     * Schedule the LLM-driven proactive inference worker.
+     * Runs every 15 minutes — sends context timeline to GPT-4o-mini
+     * for dynamic proactive reasoning (Phase 3 subconscious engine).
+     * Requires network since it makes an LLM API call.
+     */
+    private fun scheduleProactiveWorker(context: Context) {
+        val workRequest = PeriodicWorkRequestBuilder<ProactiveWorker>(
+            15, TimeUnit.MINUTES
+        )
+            .addTag("nova_notification")
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .setRequiresBatteryNotLow(false)
+                    .build()
+            )
+            .build()
+
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            WORK_PROACTIVE,
+            ExistingPeriodicWorkPolicy.KEEP,
+            workRequest
+        )
+
+        Log.d(TAG, "Scheduled proactive inference worker every 15 minutes")
+    }
+
+    /**
+     * Schedule Nova's ThinkingLoop — inner monologue every 30 minutes.
+     * Requires network (makes GPT-4o-mini API call).
+     */
+    private fun scheduleThinkingWorker(context: Context) {
+        val workRequest = PeriodicWorkRequestBuilder<ThinkingWorker>(
+            30, TimeUnit.MINUTES
+        )
+            .addTag("nova_brain")
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .setRequiresBatteryNotLow(false)
+                    .build()
+            )
+            .build()
+
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            WORK_THINKING,
+            ExistingPeriodicWorkPolicy.KEEP,
+            workRequest
+        )
+
+        Log.d(TAG, "Scheduled thinking worker every 30 minutes")
+    }
+
+    /**
+     * Schedule one-time embedding backfill for existing memories.
+     * Uses KEEP policy so it only runs once (won't re-run on every app launch).
+     */
+    private fun scheduleEmbeddingBackfill(context: Context) {
+        val workRequest = OneTimeWorkRequestBuilder<EmbeddingBackfillWorker>()
+            .addTag("nova_memory")
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .setRequiresBatteryNotLow(true)
+                    .build()
+            )
+            .build()
+
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            WORK_EMBEDDING_BACKFILL,
+            ExistingWorkPolicy.KEEP,
+            workRequest
+        )
+
+        Log.d(TAG, "Scheduled embedding backfill (one-time)")
     }
 
     /**

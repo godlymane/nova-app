@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep -l \"widget\\\\|Widget\")",
+      "mcp__Desktop_Commander__write_file",
+      "Bash(xargs grep -l \"embedding\\\\|vector\\\\|similarity\\\\|cosine\\\\|tflist\\\\|tensorflow\")"
+    ]
+  }
+}

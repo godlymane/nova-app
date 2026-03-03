@@ -36,7 +36,7 @@ object SendWhatsAppFullToolExecutor {
     private suspend fun execute(context: Context, params: Map<String, Any>): ToolResult {
         return try {
             if (!NovaAccessibilityService.isRunning()) {
-                return ToolResult(false, "Accessibility service not enabled. Please enable Nova in Settings > Accessibility.")
+                return ToolResult(false, "Accessibility service not connected. Please toggle Nova OFF then ON in Settings > Accessibility to rebind it.")
             }
 
             val contactName = (params["contact_name"] as? String)?.trim()
@@ -73,7 +73,7 @@ object SendWhatsAppFullToolExecutor {
             context.startActivity(intent)
 
             // Wait for WhatsApp to load
-            delay(2000)
+            delay(1000)
 
             // Wait for the send button to appear
             val sendFound = UIAutomator.waitForText("Send", 5000)

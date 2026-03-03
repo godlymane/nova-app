@@ -5,6 +5,7 @@ import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.nova.companion.routines.RoutineRecorder
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -24,7 +25,30 @@ class NovaAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Action-driven, not event-driven. Tools call us directly.
+        if (event == null) return
+
+        // Feed events to RoutineRecorder when teaching mode is active
+        if (RoutineRecorder.isRecording.value) {
+            RoutineRecorder.onEvent(event)
+        }
+
+        // Track foreground app and visible content for screen context awareness
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                val pkg = event.packageName?.toString() ?: return
+                val cls = event.className?.toString() ?: ""
+                ScreenContext.onWindowChanged(pkg, cls)
+                // Update visible text on window change
+                ScreenContext.updateVisibleText(getRootNode())
+            }
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                // Throttle: only update text if last update was >2s ago
+                val state = ScreenContext.state.value
+                if (System.currentTimeMillis() - state.lastUpdated > 2000) {
+                    ScreenContext.updateVisibleText(getRootNode())
+                }
+            }
+        }
     }
 
     override fun onInterrupt() {

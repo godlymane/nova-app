@@ -51,7 +51,7 @@ class NovaViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Memory System ──────────────────────────────────────────
     private val db = NovaDatabase.getInstance(app)
-    val memoryManager = MemoryManager(db)
+    val memoryManager = MemoryManager(db, app.applicationContext)
 
     // ── Voice System ─────────────────────────────────────────────
     val voiceManager = VoiceManager()

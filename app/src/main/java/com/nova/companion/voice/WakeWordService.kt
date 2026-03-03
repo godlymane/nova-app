@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -116,6 +117,15 @@ class WakeWordService : Service() {
         fun resumeListening() {
             instance?.resumePorcupine()
         }
+
+        /**
+         * Update the foreground notification with pipeline state.
+         * Called from NovaVoicePipeline so the user knows what Nova is doing
+         * even when the app is minimized.
+         */
+        fun updateStatus(status: String) {
+            instance?.updateNotification(status)
+        }
     }
 
     // ── Internal state ──────────────────────────────────────────
@@ -213,8 +223,19 @@ class WakeWordService : Service() {
 
     // ── Wake word callback ──────────────────────────────────────
 
+    // Debounce to prevent duplicate triggers (Porcupine sometimes fires twice)
+    @Volatile
+    private var lastWakeWordTime = 0L
+    private val WAKE_WORD_DEBOUNCE_MS = 3000L
+
     private val wakeWordCallback = PorcupineManagerCallback { keywordIndex ->
         // Called on Porcupine's internal audio processing thread — dispatch to main
+        val now = System.currentTimeMillis()
+        if (now - lastWakeWordTime < WAKE_WORD_DEBOUNCE_MS) {
+            Log.d(TAG, "Wake word detected but debounced (${now - lastWakeWordTime}ms since last)")
+            return@PorcupineManagerCallback
+        }
+        lastWakeWordTime = now
 
         Log.i(TAG, "Wake word detected! keyword index=$keywordIndex")
         serviceScope.launch(Dispatchers.Main) {
@@ -254,13 +275,13 @@ class WakeWordService : Service() {
         // 0. Pause Porcupine immediately to release mic before ElevenLabs opens AudioRecord
         pausePorcupine()
 
-        // 1. Request audio focus so mic capture is uninterrupted
-        requestAudioFocus()
-
-        // 2. Vibrate the device — tactile confirmation for the user (100 ms)
+        // 1. Vibrate the device — tactile confirmation for the user (100 ms)
+        //    NO chime here — the chime plays in NovaVoicePipeline.onReadyForSpeech()
+        //    when STT is actually ready to capture speech. Playing a chime here would
+        //    trick the user into speaking before STT is initialized (~800ms gap).
         vibrateOnWakeWord()
 
-        // 3. If app is in background, bring MainActivity to foreground
+        // 4. If app is in background, bring MainActivity to foreground
         //    so ElevenLabs voice session gets proper lifecycle + audio routing
         if (!isAppInForeground()) {
             Log.i(TAG, "App is in background — bringing MainActivity to foreground for voice")
@@ -273,22 +294,17 @@ class WakeWordService : Service() {
             startActivity(foregroundIntent)
         }
 
-        // 4. Broadcast intent so any registered BroadcastReceivers can act
+        // 5. Broadcast intent so any registered BroadcastReceivers can act
         val broadcastIntent = Intent(ACTION_WAKE_WORD_DETECTED).apply {
             setPackage(packageName)
         }
         sendBroadcast(broadcastIntent)
 
-        // 5. Start pre-buffering mic audio IMMEDIATELY so user's command after
-        //    "Hey Nova" is captured during the ~1-2s ElevenLabs connection delay
-        ElevenLabsVoiceService.startPreBuffering(this)
-
         // 6. Emit event for ChatViewModel (no BroadcastReceiver overhead)
-        // ChatViewModel collects this event and handles starting the voice session.
-        // Do NOT also call ActiveVoiceManagerHolder directly — that causes a
-        // double voice-session race condition where two ElevenLabs connections compete.
+        // ChatViewModel collects this event and starts the voice pipeline
+        // (STT via SpeechRecognizer → CloudLLM → ElevenLabs TTS).
         _wakeWordEvent.tryEmit(Unit)
-        Log.i(TAG, "Wake word event emitted — ChatViewModel will handle voice session")
+        Log.i(TAG, "Wake word event emitted — ChatViewModel will start voice pipeline")
 
         updateNotification("Wake word detected — listening...")
     }
@@ -304,6 +320,26 @@ class WakeWordService : Service() {
             tasks.isNotEmpty() && tasks[0].topActivity?.packageName == packageName
         } catch (e: Exception) {
             false // Assume background if check fails — safe to bring foreground
+        }
+    }
+
+    // ── Listening chime ───────────────────────────────────────────
+
+    /**
+     * Play a brief, pleasant tone so the user knows Nova heard the wake word.
+     * Uses ToneGenerator for a quick ~150ms beep — no audio file needed.
+     */
+    private fun playListeningChime() {
+        try {
+            val toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80) // 80% volume
+            toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 150) // 150ms
+            // Release after tone completes
+            serviceScope.launch(Dispatchers.IO) {
+                kotlinx.coroutines.delay(300)
+                try { toneGen.release() } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to play listening chime", e)
         }
     }
 

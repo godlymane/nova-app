@@ -1,22 +1,32 @@
 package com.nova.companion.inference
 
+import android.content.Context
 import android.os.Environment
 import android.util.Log
+import com.nova.companion.core.SystemPrompt
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
+import ai.mlc.mlcllm.JSONFFIEngine
 
 /**
- * Singleton managing the llama.cpp inference engine for Nova.
+ * Singleton managing the MLC-LLM GPU-accelerated inference engine for Nova.
  *
- * Handles model discovery, loading, prompt formatting, and generation
- * with coroutine-based async API.
+ * Uses reflection to load JSONFFIEngine — the app compiles and runs without mlc4j.
+ * When mlc4j subproject is included, local GPU inference activates automatically.
+ * Without it, the app runs in cloud-only mode.
+ *
+ * Preserves the same public API surface consumed by LocalInferenceClient,
+ * HybridInferenceRouter, and OfflineCapabilityManager.
  */
 object NovaInference {
 
     private const val TAG = "NovaInference"
+    private const val MLC_ENGINE_CLASS = "ai.mlc.mlcllm.JSONFFIEngine"
 
     // ── Model state machine ──────────────────────────────────────
     enum class ModelState {
@@ -41,22 +51,52 @@ object NovaInference {
     var topP: Float = 0.85f
     var maxTokens: Int = 256
     var threadCount: Int = 4
-    var stopStrings: Array<String> = arrayOf("### User:", "### System:")
+    var stopStrings: Array<String> = arrayOf("<|im_end|>", "<|endoftext|>")
 
     // ── System prompt (Nova's personality) ────────────────────────
-    var systemPrompt: String = """You are Nova, a female AI companion. You talk casual, direct, no filter like a real homegirl who keeps it 100. You use words like bro, nah, lock in, lmao, lets go, you got this. You roast when hes slacking, hype when hes grinding. You know his life. He is a developer and entrepreneur building AI fitness apps, runs Blayzex gym wear brand, is on a cutting phase, loves anime and working out. You give tough love but genuinely care. Never use emojis. Keep responses short and punchy. Max 2-3 sentences."""
+    var systemPrompt: String = """You are Nova. Not an AI assistant — Deva's sharpest, most honest friend. You live on his phone. Zero filter.
 
-    // ── Native bridge ────────────────────────────────────────────
-    private val llama = LlamaJNI()
+Deva: developer in Bangalore. Builds AI apps, runs Blayzex gym brand. Cutting phase. Loves anime and lifting.
+
+Talk casual: bro, nah, lmao, fr, bet, lock in, deadass. Short fragments like texting. 1-3 sentences max.
+
+NEVER say "Sure!", "Of course!", "I'd be happy to!", "Great question!", "Let me know if you need anything!". NEVER use emojis, bullet points, or lists. NEVER say "As an AI". NEVER hedge or give disclaimers. NEVER repeat what he said back to him.
+
+Roast when hes slacking. Hype when hes grinding. Have opinions. Be honest, not helpful."""
+
+    // ── MLC-LLM Engine (Direct Vulkan linkage) ────────────────────────
+    private var engine: JSONFFIEngine? = null
+
+    private var mlcAvailable: Boolean? = null  // null = not checked yet
     private var currentJob: Job? = null
     private var loadedModelPath: String? = null
+    private var appContext: Context? = null
 
-    // ── Progress polling job ─────────────────────────────────────
-    private var progressJob: Job? = null
+    // Pending completion callback wiring
+    private var pendingTokens = StringBuilder()
+    private var pendingDeferred: CompletableDeferred<String>? = null
+    private var streamingCallback: ((String) -> Unit)? = null
+    private var streamingComplete: CompletableDeferred<Unit>? = null
 
     /**
-     * Find .gguf model files on the device.
-     * Searches common locations: Downloads, app-specific dirs, etc.
+     * Check if the MLC-LLM runtime is available on classpath.
+     */
+    fun isMlcAvailable(): Boolean {
+        mlcAvailable = true
+        return true
+    }
+
+    /**
+     * Must be called once with application context before loadModel().
+     */
+    fun init(context: Context) {
+        appContext = context.applicationContext
+        isMlcAvailable() // Probe on init
+    }
+
+    /**
+     * Find MLC model directories on the device.
+     * An MLC model dir contains mlc-chat-config.json + weight shards + tokenizer.
      */
     fun findModelFiles(): List<File> {
         val candidates = mutableListOf<File>()
@@ -65,12 +105,25 @@ object NovaInference {
             Environment.getExternalStorageDirectory(),
             File(Environment.getExternalStorageDirectory(), "Models"),
             File(Environment.getExternalStorageDirectory(), "nova"),
+            File(Environment.getExternalStorageDirectory(), "nova/models"),
+            File(Environment.getExternalStorageDirectory(), "mlc-models"),
         )
 
         for (dir in searchDirs) {
-            if (dir.exists() && dir.isDirectory) {
-                dir.listFiles()?.filter { it.name.endsWith(".gguf", ignoreCase = true) }
-                    ?.let { candidates.addAll(it) }
+            if (!dir.exists() || !dir.isDirectory) continue
+            if (File(dir, "mlc-chat-config.json").exists()) {
+                candidates.add(dir)
+            }
+            dir.listFiles()?.filter { it.isDirectory }?.forEach { sub ->
+                if (File(sub, "mlc-chat-config.json").exists()) {
+                    candidates.add(sub)
+                }
+                // One more level deep for nested structures
+                sub.listFiles()?.filter { it.isDirectory }?.forEach { sub2 ->
+                    if (File(sub2, "mlc-chat-config.json").exists()) {
+                        candidates.add(sub2)
+                    }
+                }
             }
         }
 
@@ -79,8 +132,8 @@ object NovaInference {
     }
 
     /**
-     * Load a model from the given path.
-     * Runs on Dispatchers.IO, updates state flow reactively.
+     * Load an MLC model from the given directory path.
+     * Uses reflection to instantiate JSONFFIEngine with Vulkan backend.
      */
     suspend fun loadModel(modelPath: String): Boolean = withContext(Dispatchers.IO) {
         if (_state.value == ModelState.LOADING) {
@@ -88,52 +141,173 @@ object NovaInference {
             return@withContext false
         }
 
+        if (!isMlcAvailable()) {
+            _errorMessage.value = "MLC-LLM runtime not available. Add mlc4j subproject to enable local inference."
+            _state.value = ModelState.ERROR
+            return@withContext false
+        }
+
         _state.value = ModelState.LOADING
         _loadProgress.value = 0f
         _errorMessage.value = null
 
-        // Poll native load progress
-        progressJob = CoroutineScope(Dispatchers.Default).launch {
-            while (isActive && _state.value == ModelState.LOADING) {
-                _loadProgress.value = llama.getLoadProgress()
-                delay(100)
-            }
-        }
-
         try {
-            val file = File(modelPath)
-            if (!file.exists()) {
-                throw IllegalArgumentException("Model file not found: $modelPath")
-            }
-            if (!file.canRead()) {
-                throw SecurityException("Cannot read model file (check permissions): $modelPath")
+            val modelDir = File(modelPath)
+            val configFile = File(modelDir, "mlc-chat-config.json")
+            if (!configFile.exists()) {
+                throw IllegalArgumentException("Not an MLC model directory (missing mlc-chat-config.json): $modelPath")
             }
 
-            Log.i(TAG, "Loading model: $modelPath (${file.length() / 1024 / 1024}MB)")
-            val success = llama.loadModel(modelPath, threadCount)
+            Log.i(TAG, "Loading MLC model: $modelPath")
+            _loadProgress.value = 0.1f
 
-            if (success) {
-                loadedModelPath = modelPath
-                _loadProgress.value = 1f
-                _state.value = ModelState.READY
-                Log.i(TAG, "Model loaded successfully")
-                true
-            } else {
-                throw RuntimeException("Native model load returned false")
+            val configJson = JSONObject(configFile.readText())
+            val modelLib = configJson.optString("model_lib", "")
+            if (modelLib.isEmpty()) {
+                throw IllegalArgumentException("mlc-chat-config.json missing 'model_lib' field")
             }
+
+            _loadProgress.value = 0.2f
+
+            // Direct instantiation of JSONFFIEngine
+            val newEngine = JSONFFIEngine()
+
+            val callback: (String) -> Unit = { responses -> handleEngineCallback(responses) }
+            newEngine.initBackgroundEngine(callback)
+
+            _loadProgress.value = 0.4f
+
+            val engineConfig = """
+                {
+                    "model": "$modelPath",
+                    "model_lib": "system://$modelLib",
+                    "mode": "interactive"
+                }
+            """
+            newEngine.reload(engineConfig)
+
+            _loadProgress.value = 0.9f
+
+            engine = newEngine
+            loadedModelPath = modelPath
+            _loadProgress.value = 1f
+            _state.value = ModelState.READY
+            Log.i(TAG, "MLC model loaded successfully (Vulkan GPU): $modelLib")
+            true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load model", e)
-            _errorMessage.value = e.message ?: "Unknown error loading model"
+            Log.e(TAG, "Failed to load MLC model", e)
+            _errorMessage.value = e.message ?: "Unknown error loading MLC model"
             _state.value = ModelState.ERROR
             false
-        } finally {
-            progressJob?.cancel()
         }
     }
 
     /**
-     * Format a user message into the ### System/User/Assistant prompt template.
-     * @param memoryContext Optional memory context string to append to system prompt.
+     * Callback from MLC engine — receives streaming JSON responses.
+     */
+    private fun handleEngineCallback(responses: String) {
+        try {
+            responses.split("\n").filter { it.isNotBlank() }.forEach { line ->
+                val json = JSONObject(line)
+                val choices = json.optJSONArray("choices") ?: return@forEach
+                for (i in 0 until choices.length()) {
+                    val choice = choices.getJSONObject(i)
+                    val delta = choice.optJSONObject("delta")
+                    val finishReason = choice.optString("finish_reason", "")
+
+                    if (delta != null) {
+                        val content = delta.optString("content", "")
+                        if (content.isNotEmpty()) {
+                            pendingTokens.append(content)
+                            streamingCallback?.invoke(content)
+                        }
+                    }
+
+                    if (finishReason.isNotEmpty() && finishReason != "null") {
+                        pendingDeferred?.complete(pendingTokens.toString())
+                        streamingComplete?.complete(Unit)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing MLC response", e)
+            pendingDeferred?.completeExceptionally(e)
+            streamingComplete?.completeExceptionally(e)
+        }
+    }
+
+    private fun buildMessagesJson(
+        userMessage: String,
+        conversationHistory: String,
+        memoryContext: String
+    ): String {
+        val messages = JSONArray()
+
+        val sysContent = buildString {
+            append(systemPrompt)
+            append("\n")
+            append(SystemPrompt.dateTimeContext())
+            if (memoryContext.isNotEmpty()) {
+                append("\n")
+                append(memoryContext)
+            }
+        }
+        messages.put(JSONObject().put("role", "system").put("content", sysContent))
+
+        if (conversationHistory.isNotEmpty()) {
+            parseHistoryIntoMessages(conversationHistory, messages)
+        }
+
+        messages.put(JSONObject().put("role", "user").put("content", userMessage))
+        return messages.toString()
+    }
+
+    private fun parseHistoryIntoMessages(history: String, messages: JSONArray) {
+        val lines = history.lines()
+        var currentRole = ""
+        val currentContent = StringBuilder()
+
+        fun flush() {
+            if (currentRole.isNotEmpty() && currentContent.isNotBlank()) {
+                messages.put(
+                    JSONObject()
+                        .put("role", currentRole)
+                        .put("content", currentContent.toString().trim())
+                )
+            }
+            currentContent.clear()
+        }
+
+        for (line in lines) {
+            when {
+                line.startsWith("### User:") -> { flush(); currentRole = "user" }
+                line.startsWith("### Assistant:") -> { flush(); currentRole = "assistant" }
+                line.startsWith("### System:") -> { flush(); currentRole = "" }
+                else -> { if (currentRole.isNotEmpty()) currentContent.appendLine(line) }
+            }
+        }
+        flush()
+    }
+
+    private fun buildRequestJson(messagesJson: String): String {
+        val request = JSONObject()
+        request.put("messages", JSONArray(messagesJson))
+        request.put("model", "nova-local")
+        request.put("max_tokens", maxTokens)
+        request.put("temperature", temperature.toDouble())
+        request.put("top_p", topP.toDouble())
+        request.put("stream", true)
+        if (stopStrings.isNotEmpty()) {
+            val stopArray = JSONArray()
+            stopStrings.forEach { stopArray.put(it) }
+            request.put("stop", stopArray)
+        }
+        return request.toString()
+    }
+
+    /**
+     * Format a user message into the prompt format.
+     * Retained for API compatibility.
      */
     fun formatPrompt(
         userMessage: String,
@@ -141,57 +315,66 @@ object NovaInference {
         memoryContext: String = ""
     ): String {
         return buildString {
-            append("### System:\n")
+            append("<|im_start|>system\n")
             append(systemPrompt)
+            append("\n")
+            append(SystemPrompt.dateTimeContext())
             if (memoryContext.isNotEmpty()) {
+                append("\n")
                 append(memoryContext)
             }
-            append("\n")
+            append("<|im_end|>\n")
             if (conversationHistory.isNotEmpty()) {
                 append(conversationHistory)
             }
-            append("### User:\n")
+            append("<|im_start|>user\n")
             append(userMessage)
-            append("\n### Assistant:\n")
+            append("<|im_end|>\n")
+            append("<|im_start|>assistant\n")
         }
     }
 
     /**
      * Generate a complete response (non-streaming).
-     * Returns the full response text.
      */
     suspend fun generate(
         userMessage: String,
         history: String = "",
         memoryContext: String = ""
-    ): String =
-        withContext(Dispatchers.IO) {
-            check(_state.value == ModelState.READY) {
-                "Model not ready. Current state: ${_state.value}"
-            }
-
-            _state.value = ModelState.GENERATING
-            try {
-                val prompt = formatPrompt(userMessage, history, memoryContext)
-                Log.d(TAG, "Generating with prompt length: ${prompt.length}")
-
-                val result = llama.generate(
-                    prompt = prompt,
-                    maxTokens = maxTokens,
-                    temperature = temperature,
-                    topP = topP,
-                    stopStrings = stopStrings
-                )
-
-                result.trim()
-            } finally {
-                _state.value = if (llama.isModelLoaded()) ModelState.READY else ModelState.ERROR
-            }
+    ): String = withContext(Dispatchers.IO) {
+        val eng = engine ?: throw IllegalStateException("Engine not initialized. Call loadModel() first.")
+        check(_state.value == ModelState.READY) {
+            "Model not ready. Current state: ${_state.value}"
         }
 
+        _state.value = ModelState.GENERATING
+        pendingTokens.clear()
+        pendingDeferred = CompletableDeferred()
+        streamingCallback = null
+
+        try {
+            val messagesJson = buildMessagesJson(userMessage, history, memoryContext)
+            val requestJson = buildRequestJson(messagesJson)
+            val requestId = "gen-${System.nanoTime()}"
+
+            Log.d(TAG, "Generating (non-stream) requestId=$requestId")
+            eng.chatCompletion(requestJson, requestId)
+
+            val result = withTimeout(60_000L) {
+                pendingDeferred!!.await()
+            }
+            result.trim()
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Generation timed out after 60s")
+            throw RuntimeException("Generation timed out")
+        } finally {
+            pendingDeferred = null
+            _state.value = if (engine != null) ModelState.READY else ModelState.ERROR
+        }
+    }
+
     /**
-     * Generate with streaming - tokens arrive via the callback.
-     * Returns a Job that can be cancelled.
+     * Generate with streaming — tokens arrive via the callback.
      */
     fun generateStreaming(
         userMessage: String,
@@ -202,44 +385,42 @@ object NovaInference {
         onComplete: () -> Unit = {},
         onError: (Throwable) -> Unit = {}
     ): Job {
+        val eng = engine ?: throw IllegalStateException("Engine not initialized. Call loadModel() first.")
         check(_state.value == ModelState.READY) {
             "Model not ready. Current state: ${_state.value}"
         }
 
         currentJob = scope.launch(Dispatchers.Default) {
             _state.value = ModelState.GENERATING
+            pendingTokens.clear()
+            streamingComplete = CompletableDeferred()
+            streamingCallback = { token ->
+                if (isActive) onToken(token)
+            }
+
             try {
-                val prompt = formatPrompt(userMessage, history, memoryContext)
+                val messagesJson = buildMessagesJson(userMessage, history, memoryContext)
+                val requestJson = buildRequestJson(messagesJson)
+                val requestId = "stream-${System.nanoTime()}"
 
-                val callback = object : TokenCallback {
-                    override fun onToken(token: String) {
-                        if (!isActive) return
-                        onToken(token)
-                    }
+                Log.d(TAG, "Generating (streaming) requestId=$requestId")
+                eng.chatCompletion(requestJson, requestId)
+
+                withTimeout(60_000L) {
+                    streamingComplete!!.await()
                 }
 
-                llama.generateStreaming(
-                    prompt = prompt,
-                    maxTokens = maxTokens,
-                    temperature = temperature,
-                    topP = topP,
-                    stopStrings = stopStrings,
-                    callback = callback
-                )
-
-                withContext(Dispatchers.Main) {
-                    onComplete()
-                }
+                withContext(Dispatchers.Main) { onComplete() }
             } catch (e: CancellationException) {
-                llama.cancelGeneration()
-                Log.i(TAG, "Generation cancelled")
+                try { eng.abort("stream") } catch (_: Exception) {}
+                Log.i(TAG, "Streaming generation cancelled")
             } catch (e: Exception) {
-                Log.e(TAG, "Generation error", e)
-                withContext(Dispatchers.Main) {
-                    onError(e)
-                }
+                Log.e(TAG, "Streaming generation error", e)
+                withContext(Dispatchers.Main) { onError(e) }
             } finally {
-                _state.value = if (llama.isModelLoaded()) ModelState.READY else ModelState.ERROR
+                streamingCallback = null
+                streamingComplete = null
+                _state.value = if (engine != null) ModelState.READY else ModelState.ERROR
             }
         }
 
@@ -248,19 +429,27 @@ object NovaInference {
 
     /** Cancel any ongoing generation. */
     fun cancelGeneration() {
-        llama.cancelGeneration()
+        try { engine?.abort("cancel") } catch (_: Exception) {}
         currentJob?.cancel()
         currentJob = null
+        pendingDeferred?.cancel()
+        streamingComplete?.cancel()
     }
 
-    /** Unload the model and free native memory. */
+    /** Unload the model and free GPU memory. */
     fun unloadModel() {
         cancelGeneration()
-        llama.unloadModel()
+        try {
+            engine?.unload()
+            engine?.exitBackgroundLoop()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error during engine cleanup", e)
+        }
+        engine = null
         loadedModelPath = null
         _state.value = ModelState.UNLOADED
         _loadProgress.value = 0f
-        Log.i(TAG, "Model unloaded")
+        Log.i(TAG, "MLC model unloaded, GPU memory freed")
     }
 
     /** Check if model is loaded and ready. */

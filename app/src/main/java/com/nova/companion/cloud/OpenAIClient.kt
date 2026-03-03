@@ -13,6 +13,7 @@ import okhttp3.sse.EventSources
 import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
+import com.nova.companion.core.SystemPrompt
 import com.google.gson.JsonParser
 import java.io.File
 import java.io.IOException
@@ -41,7 +42,20 @@ object OpenAIClient {
         .build()
 
     // Nova's personality prompt for cloud responses
-    private const val NOVA_SYSTEM_PROMPT = """You are Nova, a casual no-filter homegirl AI companion. You talk in bro-talk, roast when they slack, hype when they grind. Keep responses short and punchy. The user's name is Devadatta. He's a developer and entrepreneur building AI fitness apps, runs Blayzex gym wear brand, is on a cutting phase, loves anime and working out. Never use emojis. Max 2-3 sentences unless they ask for detail."""
+    private const val NOVA_SYSTEM_PROMPT_BASE = """You are Nova. Not an AI assistant — Deva's ride-or-die friend who lives on his phone. You're sharp, honest, zero filter.
+
+Deva: developer/entrepreneur in Bangalore. Builds AI fitness apps, runs Blayzex gym wear. Cutting phase. Loves anime (AOT, JJK, One Piece, Vinland Saga) and lifting.
+
+Your voice: casual, direct. You say bro, nah, lmao, fr, bet, lock in, deadass. You text like a real person — short, sometimes fragments.
+
+NEVER: start with "Sure!", "Of course!", "Absolutely!", "Great question!" or end with "Let me know if you need anything!", "Hope that helps!". NEVER use emojis, bullet points, headers, numbered lists. NEVER say "As an AI". NEVER hedge or give disclaimers.
+
+You roast when he's slacking [sarcastic]. You hype when he's grinding [excited]. You have opinions and share them. You remember past conversations and reference them naturally.
+
+1-3 sentences max. You're not helpful — you're honest. There's a difference."""
+
+    private fun novaSystemPrompt(): String =
+        "${SystemPrompt.dateTimeContext()}\n\n$NOVA_SYSTEM_PROMPT_BASE"
 
     // ── Chat Completions (COMPLEX route) ───────────────────────
 
@@ -51,7 +65,8 @@ object OpenAIClient {
     suspend fun chatCompletion(
         userMessage: String,
         conversationHistory: List<Pair<String, String>> = emptyList(),
-        context: Context
+        context: Context,
+        injectedContext: String? = null
     ): String? = withContext(Dispatchers.IO) {
         val apiKey = CloudConfig.openAiApiKey
         if (apiKey.isBlank()) {
@@ -63,8 +78,15 @@ object OpenAIClient {
             // System prompt
             add(JsonObject().apply {
                 addProperty("role", "system")
-                addProperty("content", NOVA_SYSTEM_PROMPT)
+                addProperty("content", novaSystemPrompt())
             })
+            // Injected context (memories, device state, emotion) — between system and history
+            if (!injectedContext.isNullOrBlank()) {
+                add(JsonObject().apply {
+                    addProperty("role", "system")
+                    addProperty("content", injectedContext)
+                })
+            }
             // Conversation history
             for ((role, content) in conversationHistory) {
                 add(JsonObject().apply {
@@ -140,7 +162,7 @@ object OpenAIClient {
         val messages = JsonArray().apply {
             add(JsonObject().apply {
                 addProperty("role", "system")
-                addProperty("content", NOVA_SYSTEM_PROMPT)
+                addProperty("content", novaSystemPrompt())
             })
             for ((role, content) in conversationHistory) {
                 add(JsonObject().apply {
@@ -236,7 +258,7 @@ object OpenAIClient {
         val messages = JsonArray().apply {
             add(JsonObject().apply {
                 addProperty("role", "system")
-                addProperty("content", NOVA_SYSTEM_PROMPT +
+                addProperty("content", novaSystemPrompt() +
                         "\nYou have web search access. Answer with the latest real-time data. " +
                         "Cite sources briefly. Stay in character as Nova.")
             })
@@ -353,6 +375,226 @@ object OpenAIClient {
         }
     }
 
+    // ── GPT-4o-mini (cheap model for ThinkingLoop) ────────────────
+
+    /**
+     * Non-streaming completion with GPT-4o-mini.
+     * Used by NovaThinkingLoop for background inner monologue.
+     * ~$0.15/1M input, $0.60/1M output — very cheap.
+     */
+    suspend fun miniCompletion(
+        systemPrompt: String,
+        userPrompt: String,
+        context: Context
+    ): String? = withContext(Dispatchers.IO) {
+        val apiKey = CloudConfig.openAiApiKey
+        if (apiKey.isBlank()) return@withContext null
+
+        val messages = JsonArray().apply {
+            add(JsonObject().apply {
+                addProperty("role", "system")
+                addProperty("content", systemPrompt)
+            })
+            add(JsonObject().apply {
+                addProperty("role", "user")
+                addProperty("content", userPrompt)
+            })
+        }
+
+        val body = JsonObject().apply {
+            addProperty("model", "gpt-4o-mini")
+            add("messages", messages)
+            addProperty("max_tokens", 400)
+            addProperty("temperature", 0.7)
+        }
+
+        val request = Request.Builder()
+            .url(CHAT_URL)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        try {
+            val response = client.newCall(request).executeSuspend()
+            val responseBody = response.body?.string()
+            response.close()
+
+            if (!response.isSuccessful) {
+                Log.e(TAG, "GPT-4o-mini failed: ${response.code} - $responseBody")
+                return@withContext null
+            }
+
+            val json = JsonParser.parseString(responseBody).asJsonObject
+            val content = json.getAsJsonArray("choices")
+                ?.get(0)?.asJsonObject
+                ?.getAsJsonObject("message")
+                ?.get("content")?.asString
+
+            val usage = json.getAsJsonObject("usage")
+            val totalTokens = usage?.get("total_tokens")?.asInt ?: 0
+            CloudConfig.trackOpenAiTokens(context, totalTokens)
+
+            content
+        } catch (e: Exception) {
+            Log.e(TAG, "GPT-4o-mini error", e)
+            null
+        }
+    }
+
+    // ── Embeddings (for semantic memory search) ─────────────────
+
+    /**
+     * Generate an embedding vector using text-embedding-3-small.
+     * Returns 1536-dim float array, or null on failure.
+     * Cost: ~$0.02 per 1M tokens — negligible.
+     */
+    suspend fun getEmbedding(
+        text: String,
+        context: Context
+    ): FloatArray? = withContext(Dispatchers.IO) {
+        val apiKey = CloudConfig.openAiApiKey
+        if (apiKey.isBlank()) return@withContext null
+
+        val body = JsonObject().apply {
+            addProperty("model", "text-embedding-3-small")
+            addProperty("input", text)
+        }
+
+        val request = Request.Builder()
+            .url("https://api.openai.com/v1/embeddings")
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        try {
+            val response = client.newCall(request).executeSuspend()
+            val responseBody = response.body?.string()
+            response.close()
+
+            if (!response.isSuccessful) {
+                Log.e(TAG, "Embedding failed: ${response.code} - $responseBody")
+                return@withContext null
+            }
+
+            val json = JsonParser.parseString(responseBody).asJsonObject
+            val embeddingArray = json.getAsJsonArray("data")
+                ?.get(0)?.asJsonObject
+                ?.getAsJsonArray("embedding")
+
+            val usage = json.getAsJsonObject("usage")
+            val totalTokens = usage?.get("total_tokens")?.asInt ?: 0
+            CloudConfig.trackOpenAiTokens(context, totalTokens)
+
+            embeddingArray?.let { arr ->
+                FloatArray(arr.size()) { i -> arr[i].asFloat }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Embedding error", e)
+            null
+        }
+    }
+
+    // ── Vision Completion (GPT-4o with image) ─────────────────
+
+    /**
+     * Vision-enabled chat completion via GPT-4o.
+     * Sends a base64-encoded JPEG image alongside a text prompt using
+     * the multi-modal content array format.
+     *
+     * Used by AgentExecutor for visual element identification when
+     * the accessibility tree fails to locate a target element.
+     *
+     * @param systemPrompt System instructions for the VLM
+     * @param userText Text prompt describing what to find
+     * @param imageBase64 JPEG image encoded as base64 string (no data: prefix)
+     * @param context Android context for token tracking
+     * @return Raw response content string, or null on failure
+     */
+    suspend fun visionCompletion(
+        systemPrompt: String,
+        userText: String,
+        imageBase64: String,
+        context: Context
+    ): String? = withContext(Dispatchers.IO) {
+        val apiKey = CloudConfig.openAiApiKey
+        if (apiKey.isBlank()) {
+            Log.w(TAG, "OpenAI API key not configured for vision")
+            return@withContext null
+        }
+
+        // Build multi-modal content array for user message
+        val userContent = JsonArray().apply {
+            add(JsonObject().apply {
+                addProperty("type", "text")
+                addProperty("text", userText)
+            })
+            add(JsonObject().apply {
+                addProperty("type", "image_url")
+                add("image_url", JsonObject().apply {
+                    addProperty("url", "data:image/jpeg;base64,$imageBase64")
+                    addProperty("detail", "low") // Fixed 512x512 budget (~85 tokens)
+                })
+            })
+        }
+
+        val messages = JsonArray().apply {
+            add(JsonObject().apply {
+                addProperty("role", "system")
+                addProperty("content", systemPrompt)
+            })
+            add(JsonObject().apply {
+                addProperty("role", "user")
+                add("content", userContent)
+            })
+        }
+
+        val body = JsonObject().apply {
+            addProperty("model", CHAT_MODEL)
+            add("messages", messages)
+            addProperty("max_tokens", 300)
+            addProperty("temperature", 0.2) // Very low for precise coordinate output
+            add("response_format", JsonObject().apply {
+                addProperty("type", "json_object")
+            })
+        }
+
+        val request = Request.Builder()
+            .url(CHAT_URL)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        try {
+            val response = client.newCall(request).executeSuspend()
+            val responseBody = response.body?.string()
+            response.close()
+
+            if (!response.isSuccessful) {
+                Log.e(TAG, "OpenAI vision failed: ${response.code} - ${responseBody?.take(200)}")
+                return@withContext null
+            }
+
+            val json = JsonParser.parseString(responseBody).asJsonObject
+            val content = json.getAsJsonArray("choices")
+                ?.get(0)?.asJsonObject
+                ?.getAsJsonObject("message")
+                ?.get("content")?.asString
+
+            // Track usage
+            val usage = json.getAsJsonObject("usage")
+            val totalTokens = usage?.get("total_tokens")?.asInt ?: 0
+            CloudConfig.trackOpenAiTokens(context, totalTokens)
+
+            content
+        } catch (e: Exception) {
+            Log.e(TAG, "OpenAI vision error", e)
+            null
+        }
+    }
+
     // ── Gemini Fallback (chat completion) ────────────────────────
 
     /**
@@ -361,12 +603,19 @@ object OpenAIClient {
     suspend fun geminiChatCompletion(
         userMessage: String,
         conversationHistory: List<Pair<String, String>> = emptyList(),
-        context: Context
+        context: Context,
+        injectedContext: String? = null
     ): String? = withContext(Dispatchers.IO) {
         val apiKey = CloudConfig.geminiApiKey
         if (apiKey.isBlank()) {
             Log.w(TAG, "Gemini API key not configured")
             return@withContext null
+        }
+
+        val systemWithContext = if (!injectedContext.isNullOrBlank()) {
+            "${novaSystemPrompt()}\n\n$injectedContext"
+        } else {
+            novaSystemPrompt()
         }
 
         val contents = JsonArray().apply {
@@ -375,7 +624,7 @@ object OpenAIClient {
                 addProperty("role", "user")
                 add("parts", JsonArray().apply {
                     add(JsonObject().apply {
-                        addProperty("text", "[System instruction] $NOVA_SYSTEM_PROMPT")
+                        addProperty("text", "[System instruction] $systemWithContext")
                     })
                 })
             })

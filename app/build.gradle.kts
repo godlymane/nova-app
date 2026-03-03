@@ -107,6 +107,7 @@ android {
     }
 }
 
+
 dependencies {
     // Core Android
     implementation("androidx.core:core-ktx:1.13.1")
@@ -144,6 +145,9 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
     implementation("com.google.code.gson:gson:2.10.1")
 
+    // Jsoup — HTML parsing for web scraping fallback
+    implementation("org.jsoup:jsoup:1.17.2")
+
     // Compose animation (for voice UI effects)
     implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.animation:animation-graphics")
@@ -154,8 +158,13 @@ dependencies {
     // ElevenLabs Android SDK — Conversational AI with client tools
     implementation("io.elevenlabs:elevenlabs-android:0.7.2")
 
+
     // Google Play Services - Location (for Nova Brain context collection)
     implementation("com.google.android.gms:play-services-location:21.1.0")
+
+    // Glance — home screen widget
+    implementation("androidx.glance:glance-appwidget:1.1.1")
+    implementation("androidx.glance:glance-material3:1.1.1")
 
     // Debug
     debugImplementation("androidx.compose.ui:ui-tooling")
@@ -167,3 +176,6 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 }
+
+// ObjectBox — must be applied AFTER android block and dependencies
+apply(plugin = "io.objectbox")

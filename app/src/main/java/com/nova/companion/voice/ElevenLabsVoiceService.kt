@@ -193,7 +193,9 @@ object ElevenLabsVoiceService {
     private var sharedAudioSessionId: Int = AudioManager.AUDIO_SESSION_ID_GENERATE
 
     // Minimum RMS energy threshold to send mic audio — filters ambient noise
-    private const val MIC_ENERGY_THRESHOLD = 150  // ~quiet speech floor; silence/ambient ~30-80
+    // NOTE: 150 was too aggressive and filtered out quiet/normal speech.
+    // Lowered to 50 — still blocks dead silence (~10-30 RMS) but passes all speech.
+    private const val MIC_ENERGY_THRESHOLD = 50
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -374,18 +376,21 @@ object ElevenLabsVoiceService {
             if (handshakeSuccess) {
                 _connectionState.value = ConnectionState.CONNECTED
                 reconnectAttempts = 0
-                emitStatusChange("Connected to ElevenLabs Conversational AI")
+                emitStatusChange("Connected — listening")
+                Log.i(TAG, "✓ WebSocket handshake complete — connection ESTABLISHED")
 
                 // Stop pre-buffer recording (releases the temporary AudioRecord)
                 stopPreBuffering()
 
                 // Start microphone recording on the main AudioRecord
                 startMicrophoneCapture()
+                Log.i(TAG, "✓ Main mic capture started")
 
                 // Flush any pre-buffered audio captured between wake word and now
                 val bufferedChunks = preBuffer.size
                 if (bufferedChunks > 0) {
-                    Log.i(TAG, "Flushing $bufferedChunks pre-buffered audio chunks")
+                    Log.i(TAG, "Flushing $bufferedChunks pre-buffered audio chunks to WebSocket")
+                    var flushed = 0
                     while (preBuffer.isNotEmpty()) {
                         val pcmBytes = preBuffer.poll() ?: break
                         val base64Audio = Base64.getEncoder().encodeToString(pcmBytes)
@@ -393,13 +398,18 @@ object ElevenLabsVoiceService {
                             addProperty("user_audio_chunk", base64Audio)
                         }
                         webSocket?.send(message.toString())
+                        flushed++
                     }
+                    Log.i(TAG, "✓ Flushed $flushed pre-buffered chunks — user's command should be heard")
+                } else {
+                    Log.w(TAG, "⚠ No pre-buffered audio chunks — user may need to repeat command")
                 }
 
                 true
             } else {
                 _connectionState.value = ConnectionState.ERROR
-                emitError("Handshake timeout")
+                Log.e(TAG, "✗ Handshake TIMEOUT after ${HANDSHAKE_TIMEOUT_MS}ms — WebSocket never confirmed")
+                emitError("Connection timed out — try again")
                 disconnect()
                 false
             }
@@ -712,10 +722,12 @@ object ElevenLabsVoiceService {
         recordingJob = coroutineScope.launch {
             try {
                 audioRecord?.startRecording()
-                Log.i(TAG, "Microphone recording started")
+                Log.i(TAG, "Microphone recording started (threshold=$MIC_ENERGY_THRESHOLD)")
 
                 val buffer = ShortArray(AUDIO_CHUNK_SIZE)
                 _isUserSpeaking.value = true
+                var sentChunks = 0
+                var skippedChunks = 0
 
                 while (_connectionState.value == ConnectionState.CONNECTED) {
                     val readCount = audioRecord?.read(buffer, 0, buffer.size) ?: -1
@@ -729,10 +741,15 @@ object ElevenLabsVoiceService {
                         val rms = Math.sqrt(sumSquares.toDouble() / readCount).toInt()
 
                         if (rms < MIC_ENERGY_THRESHOLD) {
-                            // Below noise floor — don't send, avoids ambient noise triggering agent
+                            skippedChunks++
+                            // Log every 100 skipped chunks so we can see if everything is being filtered
+                            if (skippedChunks % 100 == 0) {
+                                Log.d(TAG, "Mic: skipped $skippedChunks chunks (last rms=$rms), sent $sentChunks")
+                            }
                             delay(10)
                             continue
                         }
+                        sentChunks++
 
                         // Convert 16-bit PCM to base64
                         val pcmBytes = ByteArray(readCount * 2)
@@ -752,6 +769,10 @@ object ElevenLabsVoiceService {
                         }
 
                         webSocket?.send(message.toString())
+                        // Log first few sends and then every 50th for diagnostics
+                        if (sentChunks <= 3 || sentChunks % 50 == 0) {
+                            Log.d(TAG, "Mic: sent chunk #$sentChunks (rms=$rms)")
+                        }
                     } else if (readCount < 0) {
                         Log.w(TAG, "AudioRecord read error: $readCount")
                         break
@@ -761,7 +782,7 @@ object ElevenLabsVoiceService {
                 }
 
                 _isUserSpeaking.value = false
-                Log.i(TAG, "Microphone recording stopped")
+                Log.i(TAG, "Microphone recording stopped (sent=$sentChunks, skipped=$skippedChunks)")
             } catch (e: Exception) {
                 Log.e(TAG, "Microphone capture error", e)
                 emitError("Microphone capture error: ${e.message}")

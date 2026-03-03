@@ -26,6 +26,11 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
+    <!-- Media access (for sharing gallery photos to Instagram stories, etc.) -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
     <!-- ========== TIER 2 PERMISSIONS ========== -->
 
     <!-- WiFi -->
@@ -58,6 +63,11 @@
     <!-- Foreground service type for ContextEngine -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!-- ========== VISION / SCREENSHOT PERMISSION ========== -->
+
+    <!-- MediaProjection for screenshot capture (vision fallback in AgentExecutor) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
     <!-- ========== OVERLAY PERMISSION ========== -->
 
     <!-- System overlay for aura effect on top of all apps -->
@@ -82,6 +92,9 @@
 
     <!-- Wake lock -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Required for setTimer and setAlarm intents -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
     <!-- ========== WAKE WORD PERMISSIONS ========== -->
 
@@ -172,6 +185,24 @@
                 android:value="Nova ambient aura visual overlay" />
         </service>
 
+        <!-- ========== TASK BUBBLE OVERLAY SERVICE ========== -->
+
+        <service
+            android:name=".overlay.bubble.TaskBubbleService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Nova floating task progress overlay" />
+        </service>
+
+        <!-- ========== VISION SCREENSHOT SERVICE ========== -->
+
+        <service
+            android:name=".vision.ScreenshotService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
         <!-- ========== TIER 4 SERVICES ========== -->
 
         <!-- AccessibilityService for UI automation -->
@@ -187,6 +218,19 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/nova_accessibility_config" />
         </service>
+
+        <!-- ========== HOME SCREEN WIDGET ========== -->
+
+        <receiver
+            android:name=".widget.NovaWidgetReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nova_widget_info" />
+        </receiver>
 
     </application>
 

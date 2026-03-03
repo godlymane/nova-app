@@ -2,10 +2,8 @@ package com.nova.companion.ui.chat
 
 import android.app.Application
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
+import com.nova.companion.inference.HybridInferenceRouter
+import com.nova.companion.inference.OfflineCapabilityManager
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -13,8 +11,7 @@ import android.os.VibratorManager
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.nova.companion.cloud.CloudConfig
-import com.nova.companion.cloud.CloudLLMService
+import com.google.gson.Gson
 import com.nova.companion.cloud.OpenAIClient
 import com.nova.companion.core.NovaMode
 import com.nova.companion.core.NovaRouter
@@ -24,14 +21,22 @@ import com.nova.companion.inference.NovaInference
 import com.nova.companion.inference.NovaInference.ModelState
 import com.nova.companion.memory.MemoryManager
 import com.nova.companion.overlay.AuraOverlayService
+import com.nova.companion.accessibility.ScreenContext
+import com.nova.companion.brain.context.ContextInjector
+import com.nova.companion.brain.emotion.NovaEmotionEngine
+import com.nova.companion.data.entity.LearnedRoutine
+import com.nova.companion.routines.RecordedStep
+import com.nova.companion.routines.RoutineRecorder
+import com.nova.companion.overlay.bubble.TaskBubbleService
+import com.nova.companion.overlay.bubble.TaskProgressManager
 import com.nova.companion.tools.ToolRegistry
 import com.nova.companion.ui.aura.AuraState
-import com.nova.companion.voice.ElevenLabsVoiceService
+import com.nova.companion.voice.NovaVoicePipeline
 import com.nova.companion.voice.WakeWordService
+import com.nova.companion.widget.NovaWidget
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -70,18 +75,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("nova_settings", Context.MODE_PRIVATE)
 
     // ── Memory System ──────────────────────────────────────────
-    val memoryManager = MemoryManager(database)
+    val memoryManager = MemoryManager(database, appContext)
 
     // ── Router ────────────────────────────────────────────────
     val router = NovaRouter
 
-    // ── Tool Registry ──────────────────────────────────────────
+    // ── Tool Registry + Emotion Engine ─────────────────────────
     init {
         ToolRegistry.initialize(appContext)
+        NovaEmotionEngine.initialize(appContext)
+        OfflineCapabilityManager.initialize(appContext)
     }
 
-    // ── ElevenLabs Voice Service ───────────────────────────────
-    private val elevenLabsVoice = ElevenLabsVoiceService
+    // ── Voice Pipeline ────────────────────────────────────────
+    private val voicePipeline = NovaVoicePipeline
 
     // Model state from inference engine
     val modelState: StateFlow<ModelState> = NovaInference.state
@@ -108,11 +115,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val currentMode: StateFlow<NovaMode> = router.currentMode
     val isVoiceActive: StateFlow<Boolean> = router.isVoiceActive
 
-    // ElevenLabs state
-    val elevenLabsConnectionState = elevenLabsVoice.connectionState
-    val elevenLabsAgentText = elevenLabsVoice.agentTranscription
-    val elevenLabsUserText = elevenLabsVoice.userTranscription
-    val isElevenLabsSpeaking = elevenLabsVoice.isAgentSpeaking
+    // Voice pipeline state
+    val voicePipelineState = voicePipeline.state
+    val voicePartialText = voicePipeline.partialText
+    val voiceCurrentTool = voicePipeline.currentTool
 
     // ── Wake word state ───────────────────────────────────────
     private val _wakeWordTriggered = MutableStateFlow(false)
@@ -122,39 +128,35 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _automationStatus = MutableStateFlow<String?>(null)
     val automationStatus: StateFlow<String?> = _automationStatus.asStateFlow()
 
-    // ── Network connectivity observer ─────────────────────────
-    private val _isOnline = MutableStateFlow(CloudConfig.isOnline(appContext))
-    val isOnline: StateFlow<Boolean> = _isOnline.asStateFlow()
+    // ── Teach-by-demonstration state ─────────────────────────
+    val isTeaching: StateFlow<Boolean> = RoutineRecorder.isRecording
+    private var pendingSteps: List<RecordedStep>? = null
+    private var awaitingSmartFieldConfirm = false
+    private val gson = Gson()
 
-    private val connectivityManager =
-        appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-
-    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) { _isOnline.value = true }
-        override fun onLost(network: Network) { _isOnline.value = false }
-        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-            _isOnline.value = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-        }
-    }
-
-    init {
-        val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-        connectivityManager.registerNetworkCallback(request, networkCallback)
-    }
+    // ── Network + capability state (via OfflineCapabilityManager) ─
+    val isOnline: StateFlow<Boolean> = OfflineCapabilityManager.isOnline
+    val capabilityLevel: StateFlow<OfflineCapabilityManager.CapabilityLevel> =
+        OfflineCapabilityManager.capabilityLevel
 
     // ── Aura state ──────────────────────────────────────────
-    // Derived from: wake word → SURGE, generating/voice-active → ACTIVE, idle → DORMANT
+    // Derived from voice pipeline state for zero-delay visual feedback:
+    //   IDLE → DORMANT, LISTENING → LISTENING, THINKING → THINKING, SPEAKING → SPEAKING
+    //   Wake word flash → LISTENING, text generation → THINKING
     val auraState: StateFlow<AuraState> = combine(
         _wakeWordTriggered,
         _isGenerating,
-        router.isVoiceActive
-    ) { wakeWord, generating, voiceActive ->
+        voicePipeline.state
+    ) { wakeWord, generating, pipelineState ->
         when {
-            wakeWord -> AuraState.SURGE
-            generating || voiceActive -> AuraState.ACTIVE
+            // Voice pipeline active → map directly
+            pipelineState == NovaVoicePipeline.PipelineState.SPEAKING -> AuraState.SPEAKING
+            pipelineState == NovaVoicePipeline.PipelineState.LISTENING -> AuraState.LISTENING
+            pipelineState == NovaVoicePipeline.PipelineState.THINKING -> AuraState.THINKING
+            // Wake word just fired → LISTENING flare
+            wakeWord -> AuraState.LISTENING
+            // Text chat generating → THINKING
+            generating -> AuraState.THINKING
             else -> AuraState.DORMANT
         }
     }.stateIn(
@@ -162,6 +164,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = AuraState.DORMANT
     )
+
+    /** Audio amplitude from TTS for SPEAKING aura visualization */
+    val speakingAmplitude: StateFlow<Float> = voicePipeline.speakingAmplitude
 
     private var generationJob: Job? = null
 
@@ -181,21 +186,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Listen for ElevenLabs agent messages and add to chat
+        // Listen for voice pipeline user messages and add to chat
+        var lastVoiceUserMessage: String? = null
         viewModelScope.launch {
-            elevenLabsVoice.agentMessageEvent.collect { agentText ->
-                if (agentText.isNotBlank()) {
-                    messageDao.insertMessage(
-                        MessageEntity(role = "assistant", content = agentText)
-                    )
-                }
-            }
-        }
-
-        // Listen for ElevenLabs user transcriptions and add to chat
-        viewModelScope.launch {
-            elevenLabsVoice.userMessageEvent.collect { userText ->
+            voicePipeline.userMessageEvent.collect { userText ->
                 if (userText.isNotBlank()) {
+                    lastVoiceUserMessage = userText
                     messageDao.insertMessage(
                         MessageEntity(role = "user", content = userText)
                     )
@@ -203,41 +199,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Set up ElevenLabs tool call handler with timeout protection
-        elevenLabsVoice.setOnClientToolCall { toolName, toolCallId, parameters ->
-            viewModelScope.launch {
-                val tool = ToolRegistry.getTool(toolName)
-                if (tool != null) {
-                    try {
-                        val result = withTimeoutOrNull(30_000L) {
-                            tool.executor(appContext, parameters)
-                        }
-                        if (result != null) {
-                            elevenLabsVoice.sendToolResult(
-                                toolCallId = toolCallId,
-                                result = result.message,
-                                isError = !result.success
-                            )
-                        } else {
-                            elevenLabsVoice.sendToolResult(
-                                toolCallId = toolCallId,
-                                result = "Tool '$toolName' timed out after 30s",
-                                isError = true
-                            )
-                        }
-                    } catch (e: Exception) {
-                        elevenLabsVoice.sendToolResult(
-                            toolCallId = toolCallId,
-                            result = "Tool execution failed: ${e.message}",
-                            isError = true
-                        )
-                    }
-                } else {
-                    elevenLabsVoice.sendToolResult(
-                        toolCallId = toolCallId,
-                        result = "Unknown tool: $toolName",
-                        isError = true
+        // Listen for voice pipeline assistant responses and add to chat + extract memories
+        viewModelScope.launch {
+            voicePipeline.assistantMessageEvent.collect { assistantText ->
+                if (assistantText.isNotBlank()) {
+                    messageDao.insertMessage(
+                        MessageEntity(role = "assistant", content = assistantText)
                     )
+                    // Feed voice conversations into long-term memory
+                    lastVoiceUserMessage?.let { userMsg ->
+                        viewModelScope.launch(Dispatchers.IO) {
+                            try { memoryManager.processConversation(userMsg, assistantText) }
+                            catch (e: Exception) { Log.e(TAG, "Voice memory extraction failed", e) }
+                        }
+                        lastVoiceUserMessage = null
+                    }
+                    // Update home screen widget with latest response
+                    viewModelScope.launch(Dispatchers.IO) {
+                        NovaWidget.saveState(appContext, response = assistantText)
+                        NovaWidget.updateWidget(appContext)
+                    }
                 }
             }
         }
@@ -249,20 +230,44 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Forward aura state to overlay service
+        // Forward aura state to overlay service + widget
         viewModelScope.launch {
             auraState.collect { state ->
                 AuraOverlayService.updateAuraState(state)
+                viewModelScope.launch(Dispatchers.IO) {
+                    NovaWidget.saveState(appContext, auraState = state.name)
+                    NovaWidget.updateWidget(appContext)
+                }
             }
         }
 
-        // Resume Porcupine wake word listening whenever ElevenLabs session ends
+        // Forward TTS amplitude to overlay for SPEAKING visualization
         viewModelScope.launch {
-            elevenLabsVoice.connectionState.collect { state ->
-                if (state == ElevenLabsVoiceService.ConnectionState.DISCONNECTED ||
-                    state == ElevenLabsVoiceService.ConnectionState.ERROR
-                ) {
-                    WakeWordService.resumeListening()
+            speakingAmplitude.collect { amp ->
+                AuraOverlayService.updateAmplitude(amp)
+            }
+        }
+
+        // Wire overlay interactive controls
+        AuraOverlayService.onTapToListen = {
+            viewModelScope.launch { onWakeWordDetected() }
+        }
+        AuraOverlayService.onDoubleTapToStop = {
+            viewModelScope.launch {
+                voicePipeline.stop()
+                generationJob?.cancel()
+                _isGenerating.value = false
+            }
+        }
+
+        // Resume wake word listening when voice pipeline returns to IDLE
+        viewModelScope.launch {
+            voicePipeline.state.collect { pipelineState ->
+                if (pipelineState == NovaVoicePipeline.PipelineState.IDLE) {
+                    // Pipeline handles resume internally, but also switch router back
+                    if (router.isVoiceActive.value) {
+                        router.switchToTextMode()
+                    }
                 }
             }
         }
@@ -276,20 +281,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      *  3. Automatic ElevenLabs voice session start.
      */
     fun onWakeWordDetected() {
-        // Haptic feedback
-        triggerWakeWordVibration()
+        // WakeWordService already vibrates — no duplicate here
 
         viewModelScope.launch {
             _wakeWordTriggered.value = true
 
-            // Start ElevenLabs voice on wake word
-            if (CloudConfig.isOnline(appContext) && CloudConfig.hasElevenLabsKey()) {
-                startElevenLabsVoice()
+            // Switch to voice mode IMMEDIATELY so user sees the voice overlay
+            router.switchToVoiceMode(appContext)
+
+            // Start the voice pipeline — OfflineCapabilityManager determines the path
+            val online = OfflineCapabilityManager.isOnline.value
+            val capability = OfflineCapabilityManager.capabilityLevel.value
+            Log.i(TAG, ">>> Wake word received! online=$online, capability=$capability")
+
+            // Brief delay for Porcupine to release its AudioRecord.
+            delay(200)
+
+            if (online) {
+                Log.i(TAG, ">>> Starting online voice pipeline")
+                voicePipeline.start(appContext, viewModelScope)
+            } else if (OfflineCapabilityManager.isVoiceAvailable()) {
+                Log.i(TAG, ">>> Offline mode — starting offline voice pipeline (local model)")
+                voicePipeline.startOffline(appContext, viewModelScope)
             } else {
-                // Not starting ElevenLabs — Porcupine was paused by WakeWordService, resume it
-                router.switchToVoiceMode(appContext)
-                delay(500)
-                WakeWordService.resumeListening()
+                Log.w(TAG, ">>> Voice not available — no internet and no local model")
+                // Notify OfflineCapabilityManager state and switch back
+                router.switchToTextMode()
             }
 
             // Hold SURGE for 2 seconds, then clear the wake word flag
@@ -369,6 +386,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             if (success) {
                 _settings.update { it.copy(modelPath = modelPath) }
                 prefs.edit().putString("model_path", modelPath).apply()
+                OfflineCapabilityManager.updateLocalModelState()
             }
         }
     }
@@ -379,73 +397,233 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val trimmed = text.trim()
         if (trimmed.isBlank()) return
 
+        // ── Teach-by-demonstration intercept ────────────────────
+        // If we're waiting for smart field confirmation
+        if (awaitingSmartFieldConfirm && pendingSteps != null) {
+            handleSmartFieldResponse(trimmed)
+            return
+        }
+        // Check for teach stop intent while recording
+        if (RoutineRecorder.isRecording.value && router.isTeachStopIntent(trimmed)) {
+            handleTeachStop(trimmed)
+            return
+        }
+        // Check for teach start intent
+        if (router.isTeachIntent(trimmed)) {
+            handleTeachStart(trimmed)
+            return
+        }
+
         val route = router.routeTextMessage(trimmed, appContext)
         Log.i(TAG, "Message routed to: $route")
 
         when (route) {
-            NovaMode.TEXT_LOCAL -> sendLocalMessage(trimmed)
-            NovaMode.TEXT_CLOUD -> sendCloudMessage(trimmed)
             NovaMode.LIVE_DATA -> sendLiveDataMessage(trimmed)
             NovaMode.AUTOMATION -> sendAutomationMessage(trimmed)
-            NovaMode.VOICE_ELEVEN, NovaMode.VOICE_LOCAL -> sendLocalMessage(trimmed)
+            // All text/voice routes go through HybridInferenceRouter
+            else -> sendHybridMessage(trimmed)
         }
     }
 
-    private fun sendLocalMessage(text: String) {
-        if (NovaInference.state.value == ModelState.LOADING) {
-            viewModelScope.launch {
-                messageDao.insertMessage(MessageEntity(role = "user", content = text))
-                messageDao.insertMessage(
-                    MessageEntity(
-                        role = "assistant",
-                        content = "Hold on, I'm loading the local model... This only takes a moment on first launch. Try again in a few seconds!"
-                    )
-                )
-            }
-            return
-        }
-        if (NovaInference.state.value != ModelState.READY) {
-            // Online + key available → fall back to cloud silently
-            if (CloudConfig.isOnline(appContext) && CloudConfig.hasOpenAiKey()) {
-                sendCloudMessage(text)
-                return
-            }
-            // Offline and no local model — surface a user-visible error
-            viewModelScope.launch {
-                messageDao.insertMessage(MessageEntity(role = "user", content = text))
-                messageDao.insertMessage(
-                    MessageEntity(
-                        role = "assistant",
-                        content = "Hey, I can't reach the cloud and no local model is loaded. " +
-                                "Check your internet or load a model in Settings."
-                    )
-                )
-            }
-            return
-        }
+    // ── Teach-by-demonstration handlers ───────────────────────
 
+    private fun handleTeachStart(userMsg: String) {
+        viewModelScope.launch {
+            messageDao.insertMessage(MessageEntity(role = "user", content = userMsg))
+
+            // Extract a routine name from the message
+            val name = extractRoutineName(userMsg)
+            RoutineRecorder.startRecording(name)
+
+            // Show floating bubble so user sees status when Nova is minimized
+            TaskProgressManager.startTask("teach_$name", "Recording: $name")
+            TaskProgressManager.updateProgress("teach_$name", 0, "Watching your actions...")
+            try { TaskBubbleService.start(appContext) } catch (e: Exception) {
+                Log.w(TAG, "Could not start bubble overlay", e)
+            }
+
+            messageDao.insertMessage(
+                MessageEntity(
+                    role = "assistant",
+                    content = "Alright, I'm watching. Go ahead and do your thing — I'll record every step. Tell me \"done\" when you're finished."
+                )
+            )
+            Log.i(TAG, "Teach mode started: $name")
+        }
+    }
+
+    private fun handleTeachStop(userMsg: String) {
+        viewModelScope.launch {
+            messageDao.insertMessage(MessageEntity(role = "user", content = userMsg))
+
+            val steps = RoutineRecorder.stopRecording()
+            val taskId = "teach_${RoutineRecorder.getRoutineName()}"
+
+            if (steps.isEmpty()) {
+                TaskProgressManager.failTask(taskId, "No actions captured")
+                try { TaskBubbleService.stop(appContext) } catch (_: Exception) {}
+                messageDao.insertMessage(
+                    MessageEntity(
+                        role = "assistant",
+                        content = "Hmm I didn't catch any actions. Make sure accessibility is on and try again."
+                    )
+                )
+                return@launch
+            }
+
+            pendingSteps = steps
+
+            // Update bubble: recording done
+            TaskProgressManager.completeTask(taskId, "Captured ${steps.size} steps")
+
+            // Summarize what we recorded
+            val summary = buildStepSummary(steps)
+            val hasTextInputs = steps.any { it.action == "type" && it.typedText.isNotBlank() }
+
+            val response = buildString {
+                append("Got it, I recorded ${steps.size} steps:\n\n")
+                append(summary)
+                if (hasTextInputs) {
+                    append("\n\nI noticed you typed some text. Should I write fresh content each time I replay this (like a new caption), or use the exact same text? Say \"fresh\" or \"same\".")
+                    awaitingSmartFieldConfirm = true
+                } else {
+                    append("\n\nSaving this routine as \"${RoutineRecorder.getRoutineName()}\". You can run it anytime by asking me to do it.")
+                    saveRoutine(steps, smartFields = false)
+                }
+            }
+
+            messageDao.insertMessage(MessageEntity(role = "assistant", content = response))
+        }
+    }
+
+    private fun handleSmartFieldResponse(userMsg: String) {
+        viewModelScope.launch {
+            messageDao.insertMessage(MessageEntity(role = "user", content = userMsg))
+
+            val lower = userMsg.lowercase()
+            val makeSmart = lower.contains("fresh") || lower.contains("new") ||
+                    lower.contains("generate") || lower.contains("different")
+
+            val steps = pendingSteps ?: run {
+                awaitingSmartFieldConfirm = false
+                return@launch
+            }
+
+            saveRoutine(steps, smartFields = makeSmart)
+
+            val msg = if (makeSmart) {
+                "Nice, I'll generate fresh text each time. Routine \"${RoutineRecorder.getRoutineName()}\" saved. Just ask me to do it whenever."
+            } else {
+                "Cool, I'll use the same text. Routine \"${RoutineRecorder.getRoutineName()}\" saved. Just ask me to do it whenever."
+            }
+
+            messageDao.insertMessage(MessageEntity(role = "assistant", content = msg))
+            pendingSteps = null
+            awaitingSmartFieldConfirm = false
+        }
+    }
+
+    private fun saveRoutine(steps: List<RecordedStep>, smartFields: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val finalSteps = if (smartFields) {
+                    steps.map { step ->
+                        if (step.action == "type" && step.typedText.isNotBlank()) {
+                            step.copy(
+                                isSmartField = true,
+                                smartFieldHint = "Write similar content to: ${step.typedText.take(50)}"
+                            )
+                        } else step
+                    }
+                } else steps
+
+                val routineName = RoutineRecorder.getRoutineName()
+                val primaryApp = finalSteps.firstOrNull { it.packageName.isNotBlank() }?.packageName ?: ""
+                val triggerPhrases = generateTriggerPhrases(routineName)
+
+                val routine = LearnedRoutine(
+                    name = routineName,
+                    triggerPhrases = gson.toJson(triggerPhrases),
+                    steps = gson.toJson(finalSteps),
+                    appPackage = primaryApp
+                )
+
+                database.learnedRoutineDao().insert(routine)
+                Log.i(TAG, "Saved learned routine: $routineName (${finalSteps.size} steps)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save routine", e)
+            }
+        }
+    }
+
+    private fun extractRoutineName(message: String): String {
+        val lower = message.lowercase()
+        // Try to extract what comes after "how to"
+        val howToMatch = Regex("how to (.+?)(?:\\.|$)").find(lower)
+        if (howToMatch != null) return howToMatch.groupValues[1].trim()
+
+        // Try to extract after "teach you to"
+        val teachMatch = Regex("teach you (?:to |how to )?(.+?)(?:\\.|$)").find(lower)
+        if (teachMatch != null) return teachMatch.groupValues[1].trim()
+
+        // Try after "show you how to"
+        val showMatch = Regex("show you how to (.+?)(?:\\.|$)").find(lower)
+        if (showMatch != null) return showMatch.groupValues[1].trim()
+
+        return "custom routine"
+    }
+
+    private fun generateTriggerPhrases(name: String): List<String> {
+        val phrases = mutableListOf(name)
+        // Add variations: "do X", "run X", just "X"
+        if (!name.startsWith("do ")) phrases.add("do $name")
+        if (!name.startsWith("run ")) phrases.add("run $name")
+        return phrases
+    }
+
+    private fun buildStepSummary(steps: List<RecordedStep>): String {
+        return steps.mapIndexed { i, step ->
+            val desc = when (step.action) {
+                "open_app" -> "Open ${step.packageName.substringAfterLast(".")}"
+                "tap" -> "Tap on \"${(step.targetText.ifBlank { step.targetDesc }).take(30)}\""
+                "type" -> "Type \"${step.typedText.take(30)}${if (step.typedText.length > 30) "..." else ""}\""
+                "scroll" -> "Scroll ${step.scrollDirection}"
+                "back" -> "Press back"
+                "wait" -> "Wait"
+                else -> step.action
+            }
+            "${i + 1}. $desc"
+        }.joinToString("\n")
+    }
+
+    /**
+     * Unified message handler — routes through HybridInferenceRouter which
+     * classifies task complexity and picks local SLM vs cloud LLM automatically.
+     * Also fires local gap-fill for complex tasks (quick ack while cloud processes).
+     */
+    private fun sendHybridMessage(text: String) {
         viewModelScope.launch {
             messageDao.insertMessage(MessageEntity(role = "user", content = text))
-
             _isGenerating.value = true
             _streamingText.value = ""
 
-            val history = buildConversationHistory()
+            val history = buildCloudHistory()
             val memoryContext = try {
-                memoryManager.injectContext(text)
+                ContextInjector.buildInjectedContext(text, memoryManager, appContext)
             } catch (e: Exception) {
-                Log.e(TAG, "Error building memory context", e)
+                Log.e(TAG, "Context injection failed", e)
                 ""
             }
 
-            generationJob = NovaInference.generateStreaming(
+            HybridInferenceRouter.route(
                 userMessage = text,
-                history = history,
+                context = appContext,
+                conversationHistory = history,
                 memoryContext = memoryContext,
                 scope = viewModelScope,
                 onToken = { token -> _streamingText.update { it + token } },
-                onComplete = {
-                    val finalText = _streamingText.value.trim()
+                onComplete = { fullResponse ->
+                    val finalText = fullResponse.ifBlank { _streamingText.value }.trim()
                     if (finalText.isNotEmpty()) {
                         viewModelScope.launch {
                             messageDao.insertMessage(
@@ -455,6 +633,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         viewModelScope.launch(Dispatchers.IO) {
                             try { memoryManager.processConversation(text, finalText) }
                             catch (e: Exception) { Log.e(TAG, "Error processing memories", e) }
+                        }
+                        viewModelScope.launch(Dispatchers.IO) {
+                            try { NovaEmotionEngine.updateFromConversation(text, finalText) }
+                            catch (e: Exception) { Log.e(TAG, "Emotion update failed", e) }
+                        }
+                        viewModelScope.launch(Dispatchers.IO) {
+                            NovaWidget.saveState(appContext, response = finalText)
+                            NovaWidget.updateWidget(appContext)
                         }
                     }
                     _streamingText.value = ""
@@ -471,53 +657,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     _streamingText.value = ""
                     _isGenerating.value = false
+                },
+                onGapFill = { ack ->
+                    // Show quick local acknowledgment while cloud processes
+                    _streamingText.value = ack
                 }
             )
         }
     }
 
-    private fun sendCloudMessage(text: String) {
-        viewModelScope.launch {
-            messageDao.insertMessage(MessageEntity(role = "user", content = text))
-            _isGenerating.value = true
-            _streamingText.value = ""
-
-            try {
-                val history = buildCloudHistory()
-                var response = OpenAIClient.chatCompletion(
-                    userMessage = text,
-                    conversationHistory = history,
-                    context = appContext
-                )
-                // Fallback: OpenAI failed → try Gemini
-                if (response == null && CloudConfig.hasGeminiKey()) {
-                    Log.w(TAG, "OpenAI failed, falling back to Gemini")
-                    response = OpenAIClient.geminiChatCompletion(
-                        userMessage = text,
-                        conversationHistory = history,
-                        context = appContext
-                    )
-                }
-                if (response != null) {
-                    messageDao.insertMessage(MessageEntity(role = "assistant", content = response))
-                    viewModelScope.launch(Dispatchers.IO) {
-                        try { memoryManager.processConversation(text, response) }
-                        catch (e: Exception) { Log.e(TAG, "Error processing memories", e) }
-                    }
-                } else {
-                    _isGenerating.value = false
-                    sendLocalMessage(text)
-                    return@launch
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Cloud message failed", e)
-                _isGenerating.value = false
-                sendLocalMessage(text)
-                return@launch
-            }
-            _isGenerating.value = false
-        }
-    }
+    /** @deprecated Use sendHybridMessage — kept only as fallback redirect for sendLiveDataMessage */
+    private fun sendCloudMessage(text: String) = sendHybridMessage(text)
 
     private fun sendLiveDataMessage(text: String) {
         viewModelScope.launch {
@@ -526,6 +676,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _streamingText.value = ""
 
             try {
+                // Phase 7: Try NegotiationEngine first (free APIs > web scraping > paid)
+                val negotiationResult = com.nova.companion.negotiation.NegotiationEngine.resolve(
+                    userMessage = text,
+                    context = appContext,
+                    onProgress = { status ->
+                        _streamingText.value = status
+                    }
+                )
+
+                if (negotiationResult != null) {
+                    Log.d(TAG, "NegotiationEngine resolved live data query")
+                    messageDao.insertMessage(MessageEntity(role = "assistant", content = negotiationResult))
+                    _streamingText.value = ""
+                    _isGenerating.value = false
+                    // Feed into memory for long-term learning
+                    viewModelScope.launch(Dispatchers.IO) {
+                        try { memoryManager.processConversation(text, negotiationResult) }
+                        catch (e: Exception) { Log.e(TAG, "Memory extraction failed", e) }
+                    }
+                    return@launch
+                }
+
+                // Fallback: OpenAI web search
+                Log.d(TAG, "NegotiationEngine returned null — falling back to OpenAI web search")
                 val response = OpenAIClient.webSearch(
                     userMessage = text, context = appContext
                 )
@@ -553,39 +727,44 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _isGenerating.value = true
             _streamingText.value = "Running automation..."
 
+            // Show floating bubble so user sees progress when Nova is minimized
+            val taskId = "auto_${System.currentTimeMillis()}"
+            TaskProgressManager.startTask(taskId, "Automation")
+            TaskProgressManager.updateProgress(taskId, 0, "Planning...")
+            try { TaskBubbleService.start(appContext) } catch (e: Exception) {
+                Log.w(TAG, "Could not start bubble overlay", e)
+            }
+            var toolCallCount = 0
+
             try {
-                val toolDefs = ToolRegistry.getToolDefinitionsForLLM()
                 val history = buildCloudHistory()
-                CloudLLMService.processWithTools(
-                    userMessage = text,
-                    toolDefinitions = toolDefs,
+
+                // Inject screen context so the LLM knows what app/screen the user is on
+                val screenSummary = ScreenContext.getSummary()
+                val enrichedMessage = if (screenSummary.isNotBlank()) {
+                    "$text\n\n[Screen context: $screenSummary]"
+                } else text
+
+                // HybridInferenceRouter handles cloud vs local tool execution automatically
+                HybridInferenceRouter.routeAutomation(
+                    userMessage = enrichedMessage,
                     context = appContext,
                     conversationHistory = history,
-                    onToolCall = { toolName, params ->
+                    onToolCall = { toolName ->
+                        toolCallCount++
                         _automationStatus.value = toolName
-                        val tool = ToolRegistry.getTool(toolName)
-                        if (tool != null) {
-                            try {
-                                tool.executor(appContext, params)
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Tool $toolName failed", e)
-                                com.nova.companion.tools.ToolResult(
-                                    false,
-                                    "Tool '$toolName' failed: ${e.message}"
-                                )
-                            }
-                        } else {
-                            com.nova.companion.tools.ToolResult(
-                                false,
-                                "Unknown tool: $toolName"
-                            )
-                        }
+                        TaskProgressManager.updateProgress(
+                            taskId,
+                            (toolCallCount * 15).coerceAtMost(90),
+                            "Running: $toolName"
+                        )
                     },
                     onResponse = { response ->
                         viewModelScope.launch {
                             messageDao.insertMessage(
                                 MessageEntity(role = "assistant", content = response)
                             )
+                            TaskProgressManager.completeTask(taskId, "Done")
                             _automationStatus.value = null
                             _streamingText.value = ""
                             _isGenerating.value = false
@@ -599,6 +778,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     content = "Automation failed bro: $error"
                                 )
                             )
+                            TaskProgressManager.failTask(taskId, "Failed: $error")
                             _automationStatus.value = null
                             _streamingText.value = ""
                             _isGenerating.value = false
@@ -607,6 +787,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Automation error", e)
+                TaskProgressManager.failTask(taskId, "Error: ${e.message}")
                 messageDao.insertMessage(
                     MessageEntity(
                         role = "assistant",
@@ -625,111 +806,37 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (router.isVoiceActive.value) {
             stopVoiceMode()
         } else {
-            if (CloudConfig.isOnline(appContext) && CloudConfig.hasElevenLabsKey()) {
-                startElevenLabsVoice()
+            if (OfflineCapabilityManager.isOnline.value) {
+                startVoicePipeline()
+            } else if (OfflineCapabilityManager.isVoiceAvailable()) {
+                // Offline but local model loaded — start offline voice
+                router.switchToVoiceMode(appContext)
+                viewModelScope.launch {
+                    delay(200)
+                    voicePipeline.startOffline(appContext, viewModelScope)
+                }
             } else {
                 router.switchToVoiceMode(appContext)
             }
         }
     }
 
-    private fun startElevenLabsVoice() {
+    private fun startVoicePipeline() {
         router.switchToVoiceMode(appContext)
         viewModelScope.launch {
-            try {
-                // Give Porcupine ~200 ms to fully stop its AudioRecord before ElevenLabs opens its own
-                delay(200)
-
-                // Build context-aware system prompt to inject on connect
-                val systemPromptOverride = buildVoiceSystemPrompt()
-
-                // Build client tool definitions so ElevenLabs agent knows what tools to call
-                val clientTools = buildClientToolDefs()
-
-                val connected = elevenLabsVoice.connect(systemPromptOverride, clientTools)
-                if (!connected) {
-                    WakeWordService.resumeListening()
-                    router.setMode(NovaMode.VOICE_LOCAL)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "ElevenLabs connection failed", e)
-                WakeWordService.resumeListening()
-                router.setMode(NovaMode.VOICE_LOCAL)
-            }
-        }
-    }
-
-    /**
-     * Convert ToolRegistry tools to ElevenLabs ClientToolDef format.
-     */
-    private fun buildClientToolDefs(): List<ElevenLabsVoiceService.ClientToolDef> {
-        return ToolRegistry.getAllTools().values.map { tool ->
-            ElevenLabsVoiceService.ClientToolDef(
-                name = tool.name,
-                description = tool.description,
-                parameters = tool.parameters.mapValues { (_, param) ->
-                    ElevenLabsVoiceService.ToolParamDef(
-                        type = param.type,
-                        description = param.description,
-                        required = param.required
-                    )
-                }
-            )
-        }
-    }
-
-    /**
-     * Build a context-aware system prompt for ElevenLabs.
-     * Injects memory, conversation history, time — sent as conversation_initiation_client_data
-     * so the agent absorbs it silently without speaking.
-     */
-    private suspend fun buildVoiceSystemPrompt(): String {
-        return try {
-            val recentMessages = messageDao.getRecentMessages(10).reversed()
-            val historyText = if (recentMessages.isNotEmpty()) {
-                recentMessages.joinToString("\n") { msg ->
-                    val speaker = if (msg.role == "user") "Deva" else "Nova"
-                    "$speaker: ${msg.content}"
-                }
-            } else ""
-
-            val memoryContext = try {
-                memoryManager.injectContext("")
-            } catch (e: Exception) { "" }
-
-            val now = java.text.SimpleDateFormat("EEEE, MMMM d yyyy 'at' h:mm a", java.util.Locale.getDefault())
-                .format(java.util.Date())
-
-            buildString {
-                append(com.nova.companion.core.SystemPrompt.SYSTEM_PROMPT)
-                append("\n\n[Current time: $now]")
-                if (memoryContext.isNotBlank()) append("\n\n[Memory about Deva:\n$memoryContext]")
-                if (historyText.isNotBlank()) append("\n\n[Recent conversation:\n$historyText]")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error building voice system prompt", e)
-            com.nova.companion.core.SystemPrompt.SYSTEM_PROMPT
+            delay(200) // Brief delay for Porcupine to release AudioRecord
+            voicePipeline.start(appContext, viewModelScope)
         }
     }
 
     fun stopVoiceMode() {
-        if (currentMode.value == NovaMode.VOICE_ELEVEN) {
-            elevenLabsVoice.disconnect()
-        }
+        voicePipeline.stop()
         router.switchToTextMode()
     }
 
     // ── Conversation helpers ─────────────────────────────────
 
-    private suspend fun buildConversationHistory(): String {
-        val recent = messageDao.getRecentMessages(6).reversed()
-        return recent.joinToString("\n") { msg ->
-            val role = if (msg.role == "user") "### User:" else "### Assistant:"
-            "$role\n${msg.content}"
-        }
-    }
-
-    /** Build history as role/content pairs for cloud APIs (OpenAI, Gemini, etc.) */
+    /** Build history as role/content pairs — used by hybrid router and cloud APIs */
     private suspend fun buildCloudHistory(): List<Pair<String, String>> {
         return messageDao.getRecentMessages(10).reversed().map { msg ->
             Pair(msg.role, msg.content)
@@ -765,6 +872,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun unloadModel() {
         NovaInference.unloadModel()
+        OfflineCapabilityManager.updateLocalModelState()
     }
 
     // ── Lifecycle ────────────────────────────────────────────
@@ -772,7 +880,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         cancelGeneration()
-        elevenLabsVoice.release()
-        try { connectivityManager.unregisterNetworkCallback(networkCallback) } catch (_: Exception) {}
+        voicePipeline.release()
+        OfflineCapabilityManager.shutdown()
     }
 }

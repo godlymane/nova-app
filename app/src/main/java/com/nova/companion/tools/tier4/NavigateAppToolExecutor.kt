@@ -69,7 +69,7 @@ object NavigateAppToolExecutor {
             context.startActivity(launchIntent)
 
             // Wait for app to load
-            delay(2000)
+            delay(1000)
 
             if (target.isNullOrBlank()) {
                 Log.i(TAG, "Opened $bestMatchLabel")
@@ -91,7 +91,7 @@ object NavigateAppToolExecutor {
             // If not found, try scrolling down once and searching again
             if (!navigated) {
                 UIAutomator.scroll("down")
-                delay(500)
+                delay(250)
                 navigated = UIAutomator.tapByText(target)
                 if (!navigated) {
                     navigated = UIAutomator.tapByDescription(target)

@@ -8,6 +8,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -18,17 +19,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.nova.companion.data.NovaDatabase
+import com.nova.companion.data.entity.ContactAlias
 import com.nova.companion.notification.NotificationScheduler
 import com.nova.companion.notification.NovaNotificationPrefs
 import com.nova.companion.ui.chat.ChatViewModel
 import com.nova.companion.ui.theme.*
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     viewModel: ChatViewModel,
     onNavigateBack: () -> Unit,
-    onNavigateToMemoryDebug: () -> Unit = {}
+    onNavigateToMemoryDebug: () -> Unit = {},
+    onNavigateToGodMode: () -> Unit = {}
 ) {
     val settings by viewModel.settings.collectAsState()
     var showClearDialog by remember { mutableStateOf(false) }
@@ -98,11 +103,16 @@ fun SettingsScreen(
                                 color = NovaTextSecondary
                             )
                             settings.availableModels.forEach { file ->
+                                val sizeMb = if (file.isDirectory) {
+                                    (file.walkBottomUp().filter { it.isFile }.sumOf { it.length() } / 1_000_000)
+                                } else {
+                                    file.length() / 1_000_000
+                                }
                                 TextButton(
                                     onClick = { viewModel.loadModel(file.absolutePath) }
                                 ) {
                                     Text(
-                                        "${file.name} (${file.length() / 1_000_000}MB)",
+                                        "${file.name} (${sizeMb}MB)",
                                         color = NovaBlue
                                     )
                                 }
@@ -203,6 +213,11 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Contact Aliases
+            ContactAliasSection()
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -357,6 +372,31 @@ fun SettingsScreen(
                         )
                     }
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // God Mode — Phase 15 Bio-Acoustic Overdrive
+                SettingsCard {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onNavigateToGodMode() }
+                            .padding(16.dp)
+                    ) {
+                        Text(
+                            "⚡ God Mode",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFFFFD700),
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            "Bio-Acoustic Overdrive Protocol — Vagus, Gamma, Retinal strobe",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = NovaTextSecondary
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(24.dp))
@@ -451,6 +491,191 @@ private fun AboutRow(label: String, value: String) {
             value,
             style = MaterialTheme.typography.bodyMedium,
             color = NovaTextPrimary
+        )
+    }
+}
+
+// ── Contact Alias Settings ────────────────────────────────────────
+
+@Composable
+private fun ContactAliasSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val dao = remember { NovaDatabase.getInstance(context).contactAliasDao() }
+
+    var aliases by remember { mutableStateOf<List<ContactAlias>>(emptyList()) }
+    var showAddDialog by remember { mutableStateOf(false) }
+
+    // Load aliases
+    LaunchedEffect(Unit) {
+        aliases = dao.getAll()
+    }
+
+    SettingsSection(title = "Contact Aliases") {
+        SettingsCard {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    "Map short names to real contacts. Say \"text a\" instead of full names.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = NovaTextSecondary
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+
+                if (aliases.isEmpty()) {
+                    Text(
+                        "No aliases set. Tap + to add one.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = NovaTextDim
+                    )
+                } else {
+                    aliases.forEachIndexed { index, alias ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "\"${alias.alias}\"",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = NovaBlue,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    alias.contactName + if (!alias.phoneNumber.isNullOrBlank()) " (${alias.phoneNumber})" else "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = NovaTextSecondary
+                                )
+                            }
+                            IconButton(onClick = {
+                                scope.launch {
+                                    dao.delete(alias)
+                                    aliases = dao.getAll()
+                                }
+                            }) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Remove",
+                                    tint = NovaRed,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        if (index < aliases.lastIndex) {
+                            HorizontalDivider(
+                                color = NovaSurfaceVariant,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Button(
+                    onClick = { showAddDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = NovaBlue.copy(alpha = 0.15f),
+                        contentColor = NovaBlue
+                    )
+                ) {
+                    Text("+ Add Alias")
+                }
+            }
+        }
+    }
+
+    // Add alias dialog
+    if (showAddDialog) {
+        var aliasName by remember { mutableStateOf("") }
+        var contactName by remember { mutableStateOf("") }
+        var phoneNumber by remember { mutableStateOf("") }
+
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            title = { Text("Add Contact Alias", color = Color.White) },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = aliasName,
+                        onValueChange = { aliasName = it },
+                        label = { Text("Alias (e.g. a, bro, robo)") },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = NovaBlue,
+                            unfocusedBorderColor = NovaSurfaceVariant,
+                            focusedLabelColor = NovaBlue,
+                            unfocusedLabelColor = NovaTextSecondary
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = contactName,
+                        onValueChange = { contactName = it },
+                        label = { Text("Contact Name (e.g. Mom, Dad)") },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = NovaBlue,
+                            unfocusedBorderColor = NovaSurfaceVariant,
+                            focusedLabelColor = NovaBlue,
+                            unfocusedLabelColor = NovaTextSecondary
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = phoneNumber,
+                        onValueChange = { phoneNumber = it },
+                        label = { Text("Phone (optional, e.g. +919876543210)") },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = NovaBlue,
+                            unfocusedBorderColor = NovaSurfaceVariant,
+                            focusedLabelColor = NovaBlue,
+                            unfocusedLabelColor = NovaTextSecondary
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (aliasName.isNotBlank() && contactName.isNotBlank()) {
+                            scope.launch {
+                                dao.insert(
+                                    ContactAlias(
+                                        alias = aliasName.trim().lowercase(),
+                                        contactName = contactName.trim(),
+                                        phoneNumber = phoneNumber.trim().ifBlank { null }
+                                    )
+                                )
+                                aliases = dao.getAll()
+                            }
+                            showAddDialog = false
+                        }
+                    },
+                    enabled = aliasName.isNotBlank() && contactName.isNotBlank()
+                ) {
+                    Text("Add", color = NovaBlue)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddDialog = false }) {
+                    Text("Cancel", color = NovaTextSecondary)
+                }
+            },
+            containerColor = NovaDarkGray,
+            shape = RoundedCornerShape(16.dp)
         )
     }
 }
