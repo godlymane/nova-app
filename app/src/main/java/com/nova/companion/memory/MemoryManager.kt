@@ -8,6 +8,9 @@ import com.nova.companion.data.entity.*
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * Nova's memory system — extracts, stores, recalls, and injects context.
@@ -71,11 +74,13 @@ class MemoryManager(
             Regex("""(?:i live in|i'm from|im from|based in|i stay in|living in)\s+([A-Za-z\s]{2,30})"""),
             Regex("""(?:from)\s+([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)""")
         )
-        for (pattern in locationPatterns) {
-            pattern.find(msg)?.let { match ->
-                storeFact("location", match.groupValues[1].trim(), "personal", 7)
-                return@let
-            }
+        // First pattern: case-insensitive, safe to use msg
+        locationPatterns[0].find(msg)?.let { match ->
+            storeFact("location", match.groupValues[1].trim(), "personal", 7)
+        }
+        // Second pattern: requires [A-Z], must use original userMessage
+        locationPatterns[1].find(userMessage)?.let { match ->
+            storeFact("location", match.groupValues[1].trim(), "personal", 7)
         }
 
         // ── FITNESS FACTS ──
@@ -132,11 +137,12 @@ class MemoryManager(
             }
         }
 
+        // Music pattern uses [A-Za-z] — use original userMessage for best accuracy
         val musicPatterns = listOf(
             Regex("""(?:listen to|love|into|favorite (?:artist|band|music))\s+([A-Za-z\s]{2,30})"""),
         )
         for (pattern in musicPatterns) {
-            pattern.find(msg)?.let { match ->
+            pattern.find(userMessage)?.let { match ->
                 val value = match.groupValues[1].trim()
                 if (value.length > 2) {
                     storeFact("music_taste", value, "preference", 5)
@@ -494,7 +500,7 @@ class MemoryManager(
         original: String,
         out: MutableList<Pair<String, Memory>>
     ) {
-        // Name extraction
+        // Name extraction — uses original (case-sensitive) correctly
         val namePattern = Regex("""(?:my name is|i'm|im|call me)\s+([A-Z][a-z]+)""")
         namePattern.find(original)?.let { match ->
             updateProfileAsync("name", match.groupValues[1])
@@ -535,17 +541,16 @@ class MemoryManager(
 
     /**
      * Find the most relevant memories for the current message.
-     * Tries semantic search (embedding similarity) first when online,
+     * Tries ObjectBox HNSW semantic search first (no full table load),
      * falls back to keyword scoring when offline or if semantic returns nothing.
      */
     suspend fun recall(currentMessage: String, limit: Int = MAX_CONTEXT_MEMORIES): List<Memory> {
-        // Try semantic search first if we have a context (online + API key)
+        // Try ObjectBox HNSW search first (no need to load all memories)
         if (appContext != null) {
             try {
-                val allMemories = db.memoryDao().getAll()
                 val semanticResults = SemanticSearch.search(
                     query = currentMessage,
-                    memories = allMemories,
+                    memories = emptyList(), // ObjectBox HNSW doesn't use this param
                     context = appContext,
                     topK = limit
                 )
@@ -610,6 +615,7 @@ class MemoryManager(
 
     /**
      * Extract meaningful keywords from a message for memory search.
+     * Preserves known multi-word entities before splitting into single words.
      */
     private fun extractKeywords(message: String): List<String> {
         val stopWords = setOf(
@@ -628,12 +634,36 @@ class MemoryManager(
             "cant", "wont", "lets", "got", "get", "like", "know", "think", "want"
         )
 
-        return message.lowercase()
-            .replace(Regex("[^a-z0-9\\s]"), " ")
-            .split("\\s+".toRegex())
-            .filter { it.length > 2 && it !in stopWords }
+        // Preserve known multi-word entities/phrases
+        val multiWordPhrases = listOf(
+            "attack on titan", "one piece", "jujutsu kaisen", "demon slayer",
+            "dragon ball", "my hero academia", "vinland saga",
+            "new york", "san francisco", "los angeles", "hong kong",
+            "bench press", "overhead press", "pull day", "push day", "leg day",
+            "back day", "arm day", "chest day",
+            "youtube music", "google maps", "app store", "play store",
+            "machine learning", "deep learning", "artificial intelligence",
+            "personal record", "caloric deficit", "progressive overload"
+        )
+
+        val lower = message.lowercase().replace(Regex("[^a-z0-9\\s]"), " ")
+        val result = mutableListOf<String>()
+
+        // Extract multi-word phrases first
+        for (phrase in multiWordPhrases) {
+            if (lower.contains(phrase)) {
+                result.add(phrase)
+            }
+        }
+
+        // Then extract single words, excluding stop words and words already in phrases
+        val phraseWords = result.flatMap { it.split(" ") }.toSet()
+        lower.split("\\s+".toRegex())
+            .filter { it.length > 2 && it !in stopWords && it !in phraseWords }
             .distinct()
-            .take(10)
+            .forEach { result.add(it) }
+
+        return result.distinct().take(10)
     }
 
     // ────────────────────────────────────────────────────────────
@@ -646,6 +676,7 @@ class MemoryManager(
      *
      * The knowledge graph is queried first — it provides structured relationships.
      * Free-text memories fill in narrative context that the graph doesn't capture.
+     * The final string is truncated to 4000 characters to stay within token budget.
      */
     suspend fun buildContext(currentMessage: String): String {
         val parts = mutableListOf<String>()
@@ -689,7 +720,8 @@ class MemoryManager(
             parts.add("RECENT DAYS:\n$summariesStr")
         }
 
-        return if (parts.isEmpty()) "" else parts.joinToString("\n\n")
+        val fullContext = if (parts.isEmpty()) "" else parts.joinToString("\n\n")
+        return if (fullContext.length > 4000) fullContext.take(4000) + "\n[context truncated]" else fullContext
     }
 
     // ────────────────────────────────────────────────────────────
@@ -776,8 +808,9 @@ class MemoryManager(
     }
 
     private fun updateProfileAsync(key: String, value: String) {
-        // Fire-and-forget via coroutine scope - handled by caller
-        Log.d(TAG, "Profile update queued: $key = $value")
+        CoroutineScope(Dispatchers.IO).launch {
+            db.userProfileDao().upsert(UserProfile(key = key, value = value))
+        }
     }
 
     // ────────────────────────────────────────────────────────────
