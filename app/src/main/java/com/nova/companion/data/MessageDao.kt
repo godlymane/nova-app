@@ -17,6 +17,9 @@ interface MessageDao {
     @Insert
     suspend fun insertMessage(message: MessageEntity): Long
 
+    @Query("DELETE FROM messages WHERE id = :id")
+    suspend fun deleteMessageById(id: Long)
+
     @Query("DELETE FROM messages")
     suspend fun deleteAllMessages()
 

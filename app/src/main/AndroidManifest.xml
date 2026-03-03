@@ -96,6 +96,9 @@
     <!-- Required for setTimer and setAlarm intents -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
+    <!-- Required for scheduling exact reminders via AlarmManager (API 31+) -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
     <!-- ========== WAKE WORD PERMISSIONS ========== -->
 
     <!-- Required for WakeWordService foreground service on Android 14+ -->
@@ -146,6 +149,11 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- ReminderReceiver: fires scheduled reminder notifications via AlarmManager -->
+        <receiver
+            android:name=".notification.ReminderReceiver"
+            android:exported="false" />
 
         <!-- ========== TIER 2 SERVICES ========== -->
 

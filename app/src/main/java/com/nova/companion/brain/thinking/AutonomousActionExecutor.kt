@@ -1,13 +1,20 @@
 package com.nova.companion.brain.thinking
 
+import android.app.AlarmManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
+import android.os.Build
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import com.nova.companion.notification.NovaNotificationHelper
+import com.nova.companion.notification.ReminderReceiver
 import java.util.Calendar
+import java.util.Date
+import java.util.UUID
 
 /**
  * Nova's autonomous action system — the Soul.
@@ -133,9 +140,156 @@ object AutonomousActionExecutor {
     }
 
     private fun executeRemind(action: NovaThinkingLoop.NovaAction, context: Context): Boolean {
-        // For now, reminders are just immediate notifications
-        // Future: schedule with AlarmManager or WorkManager
-        return executeNotify(action, context)
+        val reminderTimeMs = parseReminderTime(action.message)
+        if (reminderTimeMs == null) {
+            Log.w(TAG, "No reminder time found in message, sending immediately")
+            return executeNotify(action, context)
+        }
+
+        // Don't schedule in the past
+        if (reminderTimeMs <= System.currentTimeMillis()) {
+            Log.w(TAG, "Parsed reminder time is in the past, sending immediately")
+            return executeNotify(action, context)
+        }
+
+        return try {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val actionId = UUID.randomUUID().toString()
+
+            val intent = Intent(context, ReminderReceiver::class.java).apply {
+                putExtra(ReminderReceiver.EXTRA_TITLE, "Nova Reminder")
+                putExtra(ReminderReceiver.EXTRA_MESSAGE, action.message)
+                putExtra(ReminderReceiver.EXTRA_ACTION_ID, actionId)
+            }
+            val pendingIntent = PendingIntent.getBroadcast(
+                context,
+                actionId.hashCode(),
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (alarmManager.canScheduleExactAlarms()) {
+                    alarmManager.setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP, reminderTimeMs, pendingIntent
+                    )
+                } else {
+                    alarmManager.setAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP, reminderTimeMs, pendingIntent
+                    )
+                }
+            } else {
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP, reminderTimeMs, pendingIntent
+                )
+            }
+
+            Log.i(TAG, "Reminder scheduled for ${Date(reminderTimeMs)}: ${action.message}")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to schedule reminder, falling back to immediate", e)
+            executeNotify(action, context)
+        }
+    }
+
+    // ── Reminder time parsing ────────────────────────────────────
+
+    /**
+     * Parse a reminder time from the message text.
+     * Handles:
+     *  - Relative: "in 30 minutes", "in 2 hours", "in 1 hour"
+     *  - Absolute: "at 5pm", "at 14:00", "at 5:30pm", "at 5:30 pm"
+     *  - Named: "tomorrow morning", "tonight"
+     * Returns epoch millis or null if parsing fails.
+     */
+    internal fun parseReminderTime(message: String): Long? {
+        val lower = message.lowercase().trim()
+
+        // ── Relative times: "in X minutes/hours" ──
+        val relMinutes = Regex("in\\s+(\\d+)\\s*min(?:ute)?s?").find(lower)
+        if (relMinutes != null) {
+            val mins = relMinutes.groupValues[1].toLongOrNull() ?: return null
+            return System.currentTimeMillis() + mins * 60 * 1000L
+        }
+        val relHours = Regex("in\\s+(\\d+)\\s*hours?").find(lower)
+        if (relHours != null) {
+            val hours = relHours.groupValues[1].toLongOrNull() ?: return null
+            return System.currentTimeMillis() + hours * 60 * 60 * 1000L
+        }
+        // "in half an hour"
+        if (lower.contains("half an hour") || lower.contains("half hour")) {
+            return System.currentTimeMillis() + 30 * 60 * 1000L
+        }
+
+        // ── Absolute times: "at 5pm", "at 5:30pm", "at 14:00", "at 5:30 pm" ──
+        val absTime = Regex("at\\s+(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?").find(lower)
+        if (absTime != null) {
+            var hour = absTime.groupValues[1].toIntOrNull() ?: return null
+            val minute = absTime.groupValues[2].toIntOrNull() ?: 0
+            val ampm = absTime.groupValues[3]
+
+            when (ampm) {
+                "pm" -> if (hour < 12) hour += 12
+                "am" -> if (hour == 12) hour = 0
+                // No am/pm specified and hour <= 12 — assume 24h format or contextual
+            }
+
+            val cal = Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, hour)
+                set(Calendar.MINUTE, minute)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }
+            // If the time is already past today, schedule for tomorrow
+            if (cal.timeInMillis <= System.currentTimeMillis()) {
+                cal.add(Calendar.DAY_OF_YEAR, 1)
+            }
+            return cal.timeInMillis
+        }
+
+        // ── Named times ──
+        if (lower.contains("tomorrow morning")) {
+            return Calendar.getInstance().apply {
+                add(Calendar.DAY_OF_YEAR, 1)
+                set(Calendar.HOUR_OF_DAY, 9)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+        }
+        if (lower.contains("tomorrow evening") || lower.contains("tomorrow night")) {
+            return Calendar.getInstance().apply {
+                add(Calendar.DAY_OF_YEAR, 1)
+                set(Calendar.HOUR_OF_DAY, 19)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+        }
+        if (lower.contains("tonight")) {
+            return Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, 21)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+                if (timeInMillis <= System.currentTimeMillis()) {
+                    add(Calendar.DAY_OF_YEAR, 1)
+                }
+            }.timeInMillis
+        }
+        if (lower.contains("this afternoon")) {
+            return Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, 14)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+                if (timeInMillis <= System.currentTimeMillis()) {
+                    add(Calendar.DAY_OF_YEAR, 1)
+                }
+            }.timeInMillis
+        }
+
+        return null
     }
 
     // ── Action tracking ──────────────────────────────────────────

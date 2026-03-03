@@ -16,6 +16,18 @@ object CloudConfig {
 
     private const val TAG = "NovaCloud"
 
+    // Common placeholder values that should NOT pass validation
+    private val PLACEHOLDER_VALUES = setOf(
+        "missing_key", "your-api-key-here", "your_api_key_here",
+        "placeholder", "test", "demo", "xxx", "TODO", "CHANGEME",
+        "insert-key-here", "insert_key_here", "sk-xxx", "sk-test",
+        "your-key", "your_key", "api-key", "api_key",
+        "ELEVENLABS_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+        "ANTHROPIC_API_KEY", "PICOVOICE_ACCESS_KEY"
+    )
+
+    private const val MIN_KEY_LENGTH = 20
+
     // Keys injected via BuildConfig from local.properties (trimmed to guard against whitespace in local.properties)
     val elevenLabsApiKey: String get() = BuildConfig.ELEVENLABS_API_KEY.trim()
     val elevenLabsVoiceId: String get() = BuildConfig.ELEVENLABS_VOICE_ID.trim()
@@ -37,14 +49,23 @@ object CloudConfig {
                 caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
+    // ── Key Validation ──────────────────────────────────────────
+
     /**
-     * Validate that required API keys are present.
+     * Base validation: not blank, not a placeholder, meets minimum length.
      */
-    fun hasElevenLabsKey(): Boolean = elevenLabsApiKey.isNotBlank()
-    fun hasOpenAiKey(): Boolean = openAiApiKey.isNotBlank()
-    fun hasGeminiKey(): Boolean = geminiApiKey.isNotBlank()
-    fun hasAnthropicKey(): Boolean = anthropicApiKey.isNotBlank()
-    fun hasPicovoiceKey(): Boolean = picovoiceAccessKey.isNotBlank()
+    private fun isValidKey(key: String): Boolean {
+        if (key.isBlank()) return false
+        if (key.length < MIN_KEY_LENGTH) return false
+        if (key.lowercase() in PLACEHOLDER_VALUES.map { it.lowercase() }) return false
+        return true
+    }
+
+    fun hasElevenLabsKey(): Boolean = isValidKey(elevenLabsApiKey)
+    fun hasOpenAiKey(): Boolean = isValidKey(openAiApiKey) && openAiApiKey.startsWith("sk-")
+    fun hasGeminiKey(): Boolean = isValidKey(geminiApiKey)
+    fun hasAnthropicKey(): Boolean = isValidKey(anthropicApiKey) && anthropicApiKey.startsWith("sk-ant-")
+    fun hasPicovoiceKey(): Boolean = isValidKey(picovoiceAccessKey)
 
     /**
      * Run startup diagnostics — logs which services are available.
@@ -52,12 +73,18 @@ object CloudConfig {
      */
     fun logStartupDiagnostics() {
         Log.i(TAG, "── Nova Cloud Diagnostics ──────────────────")
-        Log.i(TAG, "  OpenAI:     ${if (hasOpenAiKey()) "OK" else "MISSING — cloud chat & automation disabled"}")
-        Log.i(TAG, "  ElevenLabs: ${if (hasElevenLabsKey()) "OK" else "MISSING — voice mode disabled"}")
-        Log.i(TAG, "  Gemini:     ${if (hasGeminiKey()) "OK" else "MISSING — Gemini fallback disabled"}")
-        Log.i(TAG, "  Anthropic:  ${if (hasAnthropicKey()) "OK" else "MISSING — Claude fallback disabled"}")
-        Log.i(TAG, "  Picovoice:  ${if (hasPicovoiceKey()) "OK" else "MISSING — wake word disabled"}")
+        Log.i(TAG, "  OpenAI:     ${keyStatus(openAiApiKey, hasOpenAiKey(), "cloud chat & automation disabled")}")
+        Log.i(TAG, "  ElevenLabs: ${keyStatus(elevenLabsApiKey, hasElevenLabsKey(), "voice mode disabled")}")
+        Log.i(TAG, "  Gemini:     ${keyStatus(geminiApiKey, hasGeminiKey(), "Gemini fallback disabled")}")
+        Log.i(TAG, "  Anthropic:  ${keyStatus(anthropicApiKey, hasAnthropicKey(), "Claude fallback disabled")}")
+        Log.i(TAG, "  Picovoice:  ${keyStatus(picovoiceAccessKey, hasPicovoiceKey(), "wake word disabled")}")
         Log.i(TAG, "────────────────────────────────────────────")
+    }
+
+    private fun keyStatus(rawKey: String, valid: Boolean, disabledMsg: String): String = when {
+        valid -> "OK"
+        rawKey.isBlank() -> "MISSING — $disabledMsg"
+        else -> "INVALID (placeholder or bad format) — $disabledMsg"
     }
 
     /**
@@ -66,9 +93,18 @@ object CloudConfig {
      */
     fun getMissingKeyWarnings(): List<String> {
         val warnings = mutableListOf<String>()
-        if (!hasOpenAiKey()) warnings.add("OpenAI key missing — cloud chat and automation won't work")
-        if (!hasElevenLabsKey()) warnings.add("ElevenLabs key missing — voice mode disabled")
-        if (!hasPicovoiceKey()) warnings.add("Picovoice key missing — 'Hey Nova' wake word disabled")
+        if (!hasOpenAiKey()) {
+            val reason = if (openAiApiKey.isBlank()) "missing" else "invalid (check format: must start with sk-)"
+            warnings.add("OpenAI key $reason — cloud chat and automation won't work")
+        }
+        if (!hasElevenLabsKey()) {
+            val reason = if (elevenLabsApiKey.isBlank()) "missing" else "invalid (check local.properties)"
+            warnings.add("ElevenLabs key $reason — voice mode disabled")
+        }
+        if (!hasPicovoiceKey()) {
+            val reason = if (picovoiceAccessKey.isBlank()) "missing" else "invalid (check local.properties)"
+            warnings.add("Picovoice key $reason — 'Hey Nova' wake word disabled")
+        }
         return warnings
     }
 

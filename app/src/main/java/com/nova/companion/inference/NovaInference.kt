@@ -8,6 +8,8 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -72,11 +74,14 @@ Roast when hes slacking. Hype when hes grinding. Have opinions. Be honest, not h
     private var loadedModelPath: String? = null
     private var appContext: Context? = null
 
-    // Pending completion callback wiring
-    private var pendingTokens = StringBuilder()
-    private var pendingDeferred: CompletableDeferred<String>? = null
-    private var streamingCallback: ((String) -> Unit)? = null
-    private var streamingComplete: CompletableDeferred<Unit>? = null
+    // Mutex serializes generation calls so shared callback state can't be clobbered
+    private val generationMutex = Mutex()
+
+    // Pending completion callback wiring (only accessed under generationMutex or from the engine callback)
+    @Volatile private var pendingTokens = StringBuilder()
+    @Volatile private var pendingDeferred: CompletableDeferred<String>? = null
+    @Volatile private var streamingCallback: ((String) -> Unit)? = null
+    @Volatile private var streamingComplete: CompletableDeferred<Unit>? = null
 
     /**
      * Check if the MLC-LLM runtime is available on classpath.
@@ -370,34 +375,36 @@ Roast when hes slacking. Hype when hes grinding. Have opinions. Be honest, not h
         history: String = "",
         memoryContext: String = ""
     ): String = withContext(Dispatchers.IO) {
-        val eng = engine ?: throw IllegalStateException("Engine not initialized. Call loadModel() first.")
-        check(_state.value == ModelState.READY) {
-            "Model not ready. Current state: ${_state.value}"
-        }
-
-        _state.value = ModelState.GENERATING
-        pendingTokens.clear()
-        pendingDeferred = CompletableDeferred()
-        streamingCallback = null
-
-        try {
-            val messagesJson = buildMessagesJson(userMessage, history, memoryContext)
-            val requestJson = buildRequestJson(messagesJson)
-            val requestId = "gen-${System.nanoTime()}"
-
-            Log.d(TAG, "Generating (non-stream) requestId=$requestId")
-            eng.chatCompletion(requestJson, requestId)
-
-            val result = withTimeout(60_000L) {
-                pendingDeferred!!.await()
+        generationMutex.withLock {
+            val eng = engine ?: throw IllegalStateException("Engine not initialized. Call loadModel() first.")
+            check(_state.value == ModelState.READY) {
+                "Model not ready. Current state: ${_state.value}"
             }
-            result.trim()
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Generation timed out after 60s")
-            throw RuntimeException("Generation timed out")
-        } finally {
-            pendingDeferred = null
-            _state.value = if (engine != null) ModelState.READY else ModelState.ERROR
+
+            _state.value = ModelState.GENERATING
+            pendingTokens.clear()
+            pendingDeferred = CompletableDeferred()
+            streamingCallback = null
+
+            try {
+                val messagesJson = buildMessagesJson(userMessage, history, memoryContext)
+                val requestJson = buildRequestJson(messagesJson)
+                val requestId = "gen-${System.nanoTime()}"
+
+                Log.d(TAG, "Generating (non-stream) requestId=$requestId")
+                eng.chatCompletion(requestJson, requestId)
+
+                val result = withTimeout(60_000L) {
+                    pendingDeferred!!.await()
+                }
+                result.trim()
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "Generation timed out after 60s")
+                throw RuntimeException("Generation timed out")
+            } finally {
+                pendingDeferred = null
+                _state.value = if (engine != null) ModelState.READY else ModelState.ERROR
+            }
         }
     }
 
@@ -419,39 +426,41 @@ Roast when hes slacking. Hype when hes grinding. Have opinions. Be honest, not h
         }
 
         currentJob = scope.launch(Dispatchers.Default) {
-            _state.value = ModelState.GENERATING
-            pendingTokens.clear()
-            streamingComplete = CompletableDeferred()
-            streamingCallback = { token ->
-                if (isActive) onToken(token)
-            }
-
-            try {
-                val messagesJson = buildMessagesJson(userMessage, history, memoryContext)
-                val requestJson = buildRequestJson(messagesJson)
-                val requestId = "stream-${System.nanoTime()}"
-
-                Log.d(TAG, "Generating (streaming) requestId=$requestId")
-                eng.chatCompletion(requestJson, requestId)
-
-                withTimeout(60_000L) {
-                    streamingComplete!!.await()
+            generationMutex.withLock {
+                _state.value = ModelState.GENERATING
+                pendingTokens.clear()
+                streamingComplete = CompletableDeferred()
+                streamingCallback = { token ->
+                    if (isActive) onToken(token)
                 }
 
-                withContext(Dispatchers.Main) { onComplete() }
-            } catch (e: CancellationException) {
-                try { eng.abort("stream") } catch (_: Throwable) {}
-                Log.i(TAG, "Streaming generation cancelled")
-            } catch (e: Exception) {
-                Log.e(TAG, "Streaming generation error", e)
-                withContext(Dispatchers.Main) { onError(e) }
-            } catch (e: Error) {
-                Log.e(TAG, "Streaming generation native error", e)
-                withContext(Dispatchers.Main) { onError(RuntimeException("Native library error: ${e.message}", e)) }
-            } finally {
-                streamingCallback = null
-                streamingComplete = null
-                _state.value = if (engine != null) ModelState.READY else ModelState.ERROR
+                try {
+                    val messagesJson = buildMessagesJson(userMessage, history, memoryContext)
+                    val requestJson = buildRequestJson(messagesJson)
+                    val requestId = "stream-${System.nanoTime()}"
+
+                    Log.d(TAG, "Generating (streaming) requestId=$requestId")
+                    eng.chatCompletion(requestJson, requestId)
+
+                    withTimeout(60_000L) {
+                        streamingComplete!!.await()
+                    }
+
+                    withContext(Dispatchers.Main) { onComplete() }
+                } catch (e: CancellationException) {
+                    try { eng.abort("stream") } catch (_: Throwable) {}
+                    Log.i(TAG, "Streaming generation cancelled")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Streaming generation error", e)
+                    withContext(Dispatchers.Main) { onError(e) }
+                } catch (e: Error) {
+                    Log.e(TAG, "Streaming generation native error", e)
+                    withContext(Dispatchers.Main) { onError(RuntimeException("Native library error: ${e.message}", e)) }
+                } finally {
+                    streamingCallback = null
+                    streamingComplete = null
+                    _state.value = if (engine != null) ModelState.READY else ModelState.ERROR
+                }
             }
         }
 

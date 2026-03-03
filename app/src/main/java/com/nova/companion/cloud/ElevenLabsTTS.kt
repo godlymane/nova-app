@@ -127,9 +127,10 @@ object ElevenLabsTTS {
         }
 
         withContext(Dispatchers.IO) {
+            var tempFile: File? = null
             try {
                 // Write to temp file for MediaPlayer
-                val tempFile = File(context.cacheDir, "nova_tts_${System.currentTimeMillis()}.mp3")
+                tempFile = File(context.cacheDir, "nova_tts_${System.currentTimeMillis()}.mp3")
                 FileOutputStream(tempFile).use { it.write(audioBytes) }
 
                 withContext(Dispatchers.Main) {
@@ -144,11 +145,13 @@ object ElevenLabsTTS {
                         )
                         setDataSource(tempFile.absolutePath)
                         setOnCompletionListener {
+                            stopPlayback()
                             tempFile.delete()
                             onComplete()
                         }
                         setOnErrorListener { _, what, extra ->
                             Log.e(TAG, "MediaPlayer error: what=$what extra=$extra")
+                            stopPlayback()
                             tempFile.delete()
                             onError("Playback error: $what")
                             true
@@ -159,6 +162,8 @@ object ElevenLabsTTS {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "TTS playback error", e)
+                stopPlayback()
+                tempFile?.delete()
                 onError(e.message ?: "Playback failed")
             }
         }
@@ -212,19 +217,17 @@ object ElevenLabsTTS {
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
+        var response: Response? = null
         try {
-            val response = client.newCall(request).executeSuspend()
+            response = client.newCall(request).executeSuspend()
 
             if (!response.isSuccessful) {
                 Log.e(TAG, "ElevenLabs stream failed: ${response.code}")
-                response.close()
                 return@withContext false
             }
 
-            val source = response.body?.source() ?: run {
-                response.close()
-                return@withContext false
-            }
+            val source = response.body?.source()
+                ?: return@withContext false
 
             val buffer = ByteArray(4096)
             while (!source.exhausted()) {
@@ -234,12 +237,13 @@ object ElevenLabsTTS {
                 }
             }
 
-            response.close()
             CloudConfig.trackElevenLabsChars(context, text.length)
             true
         } catch (e: Exception) {
             Log.e(TAG, "ElevenLabs streaming error", e)
             false
+        } finally {
+            try { response?.close() } catch (_: Exception) {}
         }
     }
 }

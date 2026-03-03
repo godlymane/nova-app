@@ -53,6 +53,7 @@ data class ChatMessage(
     val isUser: Boolean,
     val timestamp: Long = System.currentTimeMillis(),
     val isStreaming: Boolean = false,
+    val isGapFill: Boolean = false,
     val routeTag: String? = null
 )
 
@@ -408,7 +409,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             handleTeachStop(trimmed)
             return
         }
-        // Check for teach start intent
+        // During teach recording, ALL messages are treated as steps — don't route
+        if (RoutineRecorder.isRecording.value) {
+            handleTeachStep(trimmed)
+            return
+        }
+        // Check for teach start intent — BEFORE routing to prevent double-response
         if (router.isTeachIntent(trimmed)) {
             handleTeachStart(trimmed)
             return
@@ -506,6 +512,23 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             messageDao.insertMessage(MessageEntity(role = "assistant", content = response))
+        }
+    }
+
+    /**
+     * During teach recording, treat user messages as descriptive steps.
+     * The RoutineRecorder captures actual UI events via accessibility —
+     * typed messages here are just user narration / notes.
+     */
+    private fun handleTeachStep(userMsg: String) {
+        viewModelScope.launch {
+            messageDao.insertMessage(MessageEntity(role = "user", content = userMsg))
+            messageDao.insertMessage(
+                MessageEntity(
+                    role = "assistant",
+                    content = "Got it, keep going. Say \"done\" when you're finished."
+                )
+            )
         }
     }
 
@@ -614,11 +637,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * classifies task complexity and picks local SLM vs cloud LLM automatically.
      * Also fires local gap-fill for complex tasks (quick ack while cloud processes).
      */
+    /** Tracks whether the gap-fill has been replaced by cloud tokens in the current request */
+    private var gapFillReplaced = false
+    /** Stores the gap-fill message ID so we can remove it from DB when cloud responds */
+    private var gapFillMessageId: Long? = null
+
     private fun sendHybridMessage(text: String) {
         viewModelScope.launch {
             messageDao.insertMessage(MessageEntity(role = "user", content = text))
             _isGenerating.value = true
             _streamingText.value = ""
+            gapFillReplaced = false
+            gapFillMessageId = null
 
             val history = buildCloudHistory()
             val memoryContext = try {
@@ -634,9 +664,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 conversationHistory = history,
                 memoryContext = memoryContext,
                 scope = viewModelScope,
-                onToken = { token -> _streamingText.update { it + token } },
+                onToken = { token ->
+                    // First cloud token: clear gap-fill text so cloud response starts fresh
+                    if (!gapFillReplaced && _streamingText.value.isNotEmpty()) {
+                        _streamingText.value = ""
+                        gapFillReplaced = true
+                        // Remove the gap-fill message from DB so only the real response persists
+                        gapFillMessageId?.let { id ->
+                            viewModelScope.launch(Dispatchers.IO) {
+                                try { messageDao.deleteMessageById(id) }
+                                catch (e: Exception) { Log.w(TAG, "Failed to remove gap-fill msg", e) }
+                            }
+                            gapFillMessageId = null
+                        }
+                    }
+                    _streamingText.update { it + token }
+                },
                 onComplete = { fullResponse ->
                     val finalText = fullResponse.ifBlank { _streamingText.value }.trim()
+                    // Remove gap-fill from DB if cloud completed (may not have streamed tokens)
+                    gapFillMessageId?.let { id ->
+                        viewModelScope.launch(Dispatchers.IO) {
+                            try { messageDao.deleteMessageById(id) }
+                            catch (e: Exception) { Log.w(TAG, "Failed to remove gap-fill msg", e) }
+                        }
+                        gapFillMessageId = null
+                    }
                     if (finalText.isNotEmpty()) {
                         viewModelScope.launch {
                             messageDao.insertMessage(
@@ -658,22 +711,38 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     _streamingText.value = ""
                     _isGenerating.value = false
+                    gapFillReplaced = false
                 },
                 onError = { error ->
-                    viewModelScope.launch {
-                        messageDao.insertMessage(
-                            MessageEntity(
-                                role = "assistant",
-                                content = "Yo something broke: ${error.message}"
+                    // If cloud fails and we have a gap-fill, keep it as the final response
+                    val gapFillId = gapFillMessageId
+                    if (gapFillId != null) {
+                        Log.i(TAG, "Cloud failed but gap-fill present — keeping gap-fill as response")
+                        gapFillMessageId = null
+                        // Gap-fill message already in DB, just clean up state
+                    } else {
+                        viewModelScope.launch {
+                            messageDao.insertMessage(
+                                MessageEntity(
+                                    role = "assistant",
+                                    content = "Yo something broke: ${error.message}"
+                                )
                             )
-                        )
+                        }
                     }
                     _streamingText.value = ""
                     _isGenerating.value = false
+                    gapFillReplaced = false
                 },
                 onGapFill = { ack ->
-                    // Show quick local acknowledgment while cloud processes
-                    _streamingText.value = ack
+                    if (ack.isNotBlank()) {
+                        // Show gap-fill immediately as streaming text AND persist to DB
+                        _streamingText.value = ack
+                        viewModelScope.launch {
+                            val entity = MessageEntity(role = "assistant", content = ack)
+                            gapFillMessageId = messageDao.insertMessage(entity)
+                        }
+                    }
                 }
             )
         }

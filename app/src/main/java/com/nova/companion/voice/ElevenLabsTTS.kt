@@ -92,6 +92,7 @@ object ElevenLabsTTS {
         stop()
 
         withContext(Dispatchers.IO) {
+            var response: okhttp3.Response? = null
             try {
                 _isSpeaking.value = true
 
@@ -122,7 +123,7 @@ object ElevenLabsTTS {
 
                 Log.i(TAG, ">>> TTS request: voice=$voiceId model=$MODEL_ID text=\"${text.take(80)}...\" (${text.length} chars)")
 
-                val response = client.newCall(request).execute()
+                response = client.newCall(request).execute()
 
                 Log.i(TAG, ">>> TTS response: ${response.code} contentType=${response.header("Content-Type")}")
 
@@ -141,11 +142,7 @@ object ElevenLabsTTS {
                     return@withContext
                 }
 
-                // Track character usage
-                try {
-                    // We don't have context here, so just log it
-                    Log.d(TAG, "ElevenLabs TTS: ${text.length} chars synthesized")
-                } catch (_: Exception) {}
+                Log.d(TAG, "ElevenLabs TTS: ${text.length} chars synthesized")
 
                 // Stream PCM to AudioTrack
                 withContext(Dispatchers.Main) { onStart() }
@@ -159,6 +156,8 @@ object ElevenLabsTTS {
                 _isSpeaking.value = false
                 _amplitude.value = 0f
                 releaseAudioTrack()
+                // Close the OkHttp response body to release the connection back to the pool
+                try { response?.close() } catch (_: Exception) {}
             }
         }
     }
@@ -300,10 +299,10 @@ object ElevenLabsTTS {
         try {
             audioTrack?.let { track ->
                 if (track.state == AudioTrack.STATE_INITIALIZED) {
-                    track.pause()
+                    try { track.pause() } catch (_: IllegalStateException) {}
                     track.flush()
-                    track.release()
                 }
+                track.release()
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error releasing AudioTrack", e)
