@@ -414,13 +414,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        // If voice pipeline is active and user TYPED a message, switch back to text mode.
+        // The typed message should go through normal text inference, not the voice pipeline.
+        if (router.isVoiceActive.value) {
+            Log.i(TAG, "User typed during voice session — switching to text mode")
+            voicePipeline.stop()
+            router.switchToTextMode()
+        }
+
         val route = router.routeTextMessage(trimmed, appContext)
         Log.i(TAG, "Message routed to: $route")
 
         when (route) {
+            NovaMode.VOICE_ELEVEN, NovaMode.VOICE_LOCAL -> {
+                // Voice pipeline handles its own inference + TTS.
+                // Just log — the pipeline emits user/assistant messages via SharedFlows
+                // which are collected in init{} and saved to DB automatically.
+                Log.d(TAG, "Voice mode route — skipping text inference, voice pipeline handles response")
+            }
             NovaMode.LIVE_DATA -> sendLiveDataMessage(trimmed)
             NovaMode.AUTOMATION -> sendAutomationMessage(trimmed)
-            // All text/voice routes go through HybridInferenceRouter
             else -> sendHybridMessage(trimmed)
         }
     }

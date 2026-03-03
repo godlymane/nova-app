@@ -49,21 +49,27 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 
 /**
- * ElevenLabs Conversational AI Voice Service
+ * DEPRECATED: ElevenLabs Conversational AI WebSocket implementation.
  *
- * Manages the full conversational AI pipeline via WebSocket:
- * Mic → STT → LLM → TTS → Speaker (all on single WebSocket connection)
+ * This service is currently NOT used by any active code path.
+ * All voice interactions are routed through [NovaVoicePipeline] which uses:
+ *   Wake word → AudioRecord → Whisper STT → CloudLLM (with tools) → ElevenLabsTTS (REST)
  *
- * Handles:
+ * The WebSocket listener and audio pipeline below are fully implemented but
+ * untested in production. Kept as scaffolding for future real-time conversational
+ * voice mode (single WebSocket: Mic → STT → LLM → TTS → Speaker).
+ *
+ * TODO: Integrate with NovaVoicePipeline as an alternative high-speed voice path.
+ *
+ * Original capabilities (implemented but inactive):
  * - WebSocket connection to ElevenLabs Conversational AI endpoint
  * - Microphone capture with 16kHz 16-bit mono PCM
  * - Audio streaming to WebSocket as base64-encoded chunks
  * - Audio playback from WebSocket via AudioTrack
  * - Transcription updates (user & agent)
  * - Tool call handling and results
- * - Connection state management
- * - Auto-reconnect on unexpected disconnection
- * - Graceful disconnection and error recovery
+ * - Connection state management with auto-reconnect
+ * - Pre-buffering between wake word and WebSocket connect
  */
 object ElevenLabsVoiceService {
 

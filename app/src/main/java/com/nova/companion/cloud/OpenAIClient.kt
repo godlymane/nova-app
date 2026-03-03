@@ -15,6 +15,12 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.nova.companion.core.SystemPrompt
 import com.google.gson.JsonParser
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -143,15 +149,22 @@ You roast when he's slacking [sarcastic]. You hype when he's grinding [excited].
         }
     }
 
+    /** Default timeout for SSE streams — no tokens for this long triggers cancellation. */
+    private const val SSE_STREAM_TIMEOUT_MS = 30_000L
+    private const val SSE_WATCHDOG_POLL_MS = 2_000L
+
     /**
      * Streaming chat completion — tokens arrive via callback for faster UX.
+     * Includes a timeout watchdog: if no tokens arrive for [timeoutMs], the
+     * stream is cancelled and [onError] fires with a user-friendly message.
      */
     fun chatCompletionStreaming(
         userMessage: String,
         conversationHistory: List<Pair<String, String>> = emptyList(),
         onToken: (String) -> Unit,
         onComplete: (String) -> Unit,
-        onError: (String) -> Unit
+        onError: (String) -> Unit,
+        timeoutMs: Long = SSE_STREAM_TIMEOUT_MS
     ) {
         val apiKey = CloudConfig.openAiApiKey
         if (apiKey.isBlank()) {
@@ -192,15 +205,35 @@ You roast when he's slacking [sarcastic]. You hype when he's grinding [excited].
             .build()
 
         val fullResponse = StringBuilder()
+        @Volatile var lastTokenTime = System.currentTimeMillis()
+        @Volatile var streamDone = false
+        var timeoutJob: Job? = null
 
         val listener = object : EventSourceListener() {
+            override fun onOpen(eventSource: EventSource, response: Response) {
+                // Detect non-200 responses that SSE might silently accept
+                if (response.code != 200) {
+                    Log.e(TAG, "SSE stream opened with error code: ${response.code}")
+                    streamDone = true
+                    timeoutJob?.cancel()
+                    eventSource.cancel()
+                    onError("Server returned error: ${response.code}")
+                } else {
+                    lastTokenTime = System.currentTimeMillis()
+                }
+            }
+
             override fun onEvent(
                 eventSource: EventSource,
                 id: String?,
                 type: String?,
                 data: String
             ) {
+                lastTokenTime = System.currentTimeMillis()
+
                 if (data == "[DONE]") {
+                    streamDone = true
+                    timeoutJob?.cancel()
                     onComplete(fullResponse.toString())
                     return
                 }
@@ -226,18 +259,37 @@ You roast when he's slacking [sarcastic]. You hype when he's grinding [excited].
                 t: Throwable?,
                 response: Response?
             ) {
+                streamDone = true
+                timeoutJob?.cancel()
                 val msg = t?.message ?: response?.code?.toString() ?: "Unknown error"
                 Log.e(TAG, "OpenAI stream failure: $msg")
                 onError(msg)
             }
 
             override fun onClosed(eventSource: EventSource) {
+                streamDone = true
+                timeoutJob?.cancel()
                 Log.d(TAG, "OpenAI stream closed")
             }
         }
 
-        EventSources.createFactory(client)
+        val eventSource = EventSources.createFactory(client)
             .newEventSource(request, listener)
+
+        // Launch timeout watchdog — cancels stream if no tokens for [timeoutMs]
+        timeoutJob = CoroutineScope(Dispatchers.IO).launch {
+            while (isActive && !streamDone) {
+                delay(SSE_WATCHDOG_POLL_MS)
+                val elapsed = System.currentTimeMillis() - lastTokenTime
+                if (!streamDone && elapsed > timeoutMs) {
+                    Log.w(TAG, "SSE stream timeout — no tokens for ${timeoutMs}ms")
+                    streamDone = true
+                    eventSource.cancel()
+                    onError("Response timed out. Please try again.")
+                    break
+                }
+            }
+        }
     }
 
     // ── Web Search (LIVE_DATA route) ───────────────────────────

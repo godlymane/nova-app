@@ -12,6 +12,7 @@ import com.nova.companion.core.SystemPrompt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -440,6 +441,8 @@ object InferenceRouter {
      * @param tag           Logging tag for the provider name.
      * @return true if stream completed successfully, false on HTTP error.
      */
+    private const val SSE_STREAM_TIMEOUT_MS = 30_000L
+
     private fun streamSSEResponse(
         request: Request,
         extractToken: (String) -> String?,
@@ -447,8 +450,9 @@ object InferenceRouter {
         onComplete: (String) -> Unit,
         tag: String
     ): Boolean {
+        val call = httpClient.newCall(request)
         val response = try {
-            httpClient.newCall(request).execute()
+            call.execute()
         } catch (e: Exception) {
             Log.e(TAG, "$tag network error: ${e.message}")
             return false
@@ -467,6 +471,24 @@ object InferenceRouter {
         }
 
         val fullResponse = StringBuilder()
+        @Volatile var lastTokenTime = System.currentTimeMillis()
+        @Volatile var streamDone = false
+
+        // Timeout watchdog — cancels the HTTP call if no tokens arrive for 30s.
+        // The BufferedReader.readLine() blocks on the socket; cancelling the OkHttp
+        // call closes the underlying stream and unblocks the reader with an IOException.
+        val timeoutJob = CoroutineScope(Dispatchers.IO).launch {
+            while (!streamDone) {
+                delay(2_000)
+                val elapsed = System.currentTimeMillis() - lastTokenTime
+                if (!streamDone && elapsed > SSE_STREAM_TIMEOUT_MS) {
+                    Log.w(TAG, "$tag SSE stream timeout — no tokens for ${SSE_STREAM_TIMEOUT_MS}ms")
+                    streamDone = true
+                    call.cancel() // Closes the socket, unblocks readLine()
+                    break
+                }
+            }
+        }
 
         try {
             BufferedReader(InputStreamReader(body.byteStream())).use { reader ->
@@ -477,6 +499,7 @@ object InferenceRouter {
 
                     val token = extractToken(rawLine) ?: continue
                     if (token.isNotEmpty()) {
+                        lastTokenTime = System.currentTimeMillis()
                         fullResponse.append(token)
                         onToken(token)
                     }
@@ -484,9 +507,15 @@ object InferenceRouter {
             }
         } catch (e: Exception) {
             Log.e(TAG, "$tag stream read error: ${e.message}")
-            if (fullResponse.isEmpty()) return false
+            if (fullResponse.isEmpty()) {
+                streamDone = true
+                timeoutJob.cancel()
+                return false
+            }
             // Partial response is still useful — fall through to onComplete
         } finally {
+            streamDone = true
+            timeoutJob.cancel()
             response.close()
         }
 
