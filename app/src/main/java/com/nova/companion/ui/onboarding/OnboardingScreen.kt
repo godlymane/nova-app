@@ -78,7 +78,7 @@ fun OnboardingScreen(
         val auraState = when (pagerState.currentPage) {
             0    -> AuraState.DORMANT
             1    -> AuraState.DORMANT
-            else -> AuraState.ACTIVE
+            else -> AuraState.THINKING
         }
         NovaAuraEffect(
             auraState = auraState,

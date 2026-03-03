@@ -4,6 +4,8 @@ import android.content.Context
 import android.database.Cursor
 import android.provider.ContactsContract
 import android.util.Log
+import com.nova.companion.data.NovaDatabase
+import kotlinx.coroutines.runBlocking
 
 object ContactLookupHelper {
 
@@ -12,6 +14,29 @@ object ContactLookupHelper {
     data class ContactResult(val name: String, val phoneNumber: String)
 
     fun lookupByName(context: Context, name: String): List<ContactResult> {
+        // Step 1: Check contact aliases first
+        try {
+            val alias = runBlocking {
+                NovaDatabase.getInstance(context).contactAliasDao().findByAlias(name.trim())
+            }
+            if (alias != null) {
+                Log.i(TAG, "Alias match: '${name}' -> '${alias.contactName}' (alias id=${alias.id})")
+                // If alias has a direct phone number, use it
+                if (!alias.phoneNumber.isNullOrBlank()) {
+                    return listOf(ContactResult(alias.contactName, alias.phoneNumber))
+                }
+                // Otherwise resolve the real contact name
+                return lookupFromContacts(context, alias.contactName)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Alias lookup failed, falling through to contacts", e)
+        }
+
+        // Step 2: Standard Android contact lookup
+        return lookupFromContacts(context, name)
+    }
+
+    private fun lookupFromContacts(context: Context, name: String): List<ContactResult> {
         val results = mutableListOf<ContactResult>()
         var cursor: Cursor? = null
 

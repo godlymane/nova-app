@@ -28,6 +28,7 @@ object NovaNotificationHelper {
     const val NOTIFICATION_ID_INACTIVE = 1006
     const val NOTIFICATION_ID_SUNDAY = 1007
     const val NOTIFICATION_ID_MONDAY = 1008
+    const val NOTIFICATION_ID_PROACTIVE = 2001
 
     /**
      * Create the notification channel. Safe to call multiple times.

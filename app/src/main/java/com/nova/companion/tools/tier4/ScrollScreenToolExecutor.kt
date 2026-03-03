@@ -30,7 +30,7 @@ object ScrollScreenToolExecutor {
     private suspend fun execute(context: Context, params: Map<String, Any>): ToolResult {
         return try {
             if (!NovaAccessibilityService.isRunning()) {
-                return ToolResult(false, "Accessibility service not enabled. Please enable Nova in Settings > Accessibility.")
+                return ToolResult(false, "Accessibility service not connected. Please toggle Nova OFF then ON in Settings > Accessibility to rebind it.")
             }
 
             val direction = (params["direction"] as? String)?.trim()?.lowercase()
@@ -45,7 +45,7 @@ object ScrollScreenToolExecutor {
             for (i in 1..times) {
                 val scrolled = UIAutomator.scroll(direction)
                 if (!scrolled) success = false
-                if (i < times) delay(300)
+                if (i < times) delay(150)
             }
 
             Log.i(TAG, "Scrolled $direction $times time(s)")

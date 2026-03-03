@@ -30,7 +30,7 @@ object TypeTextToolExecutor {
     private suspend fun execute(context: Context, params: Map<String, Any>): ToolResult {
         return try {
             if (!NovaAccessibilityService.isRunning()) {
-                return ToolResult(false, "Accessibility service not enabled. Please enable Nova in Settings > Accessibility.")
+                return ToolResult(false, "Accessibility service not connected. Please toggle Nova OFF then ON in Settings > Accessibility to rebind it.")
             }
 
             val text = (params["text"] as? String)?.trim()

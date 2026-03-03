@@ -28,8 +28,13 @@ object SetTimerToolExecutor {
 
     private suspend fun execute(context: Context, params: Map<String, Any>): ToolResult {
         return try {
-            val durationSeconds = (params["duration_seconds"] as? Number)?.toInt()
-                ?: return ToolResult(false, "Duration in seconds is required")
+            // Gson may parse JSON numbers as Double, or the LLM may send them as strings
+            val raw = params["duration_seconds"]
+            val durationSeconds = when (raw) {
+                is Number -> raw.toInt()
+                is String -> raw.toDoubleOrNull()?.toInt()
+                else -> null
+            } ?: return ToolResult(false, "Duration in seconds is required")
             val label = params["label"] as? String
 
             if (durationSeconds <= 0) return ToolResult(false, "Duration must be greater than 0")

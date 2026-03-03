@@ -80,7 +80,6 @@ import androidx.compose.ui.unit.sp
 import com.nova.companion.core.NovaMode
 import com.nova.companion.inference.NovaInference.ModelState
 import com.nova.companion.ui.aura.AuraState
-import com.nova.companion.ui.aura.NovaAuraEffect
 import com.nova.companion.ui.theme.NovaBlack
 import com.nova.companion.ui.theme.NovaDarkGray
 import com.nova.companion.ui.theme.NovaPurpleAmbient
@@ -92,7 +91,7 @@ import com.nova.companion.ui.theme.NovaSurface
 import com.nova.companion.ui.theme.NovaSurfaceVariant
 import com.nova.companion.ui.theme.NovaTextDim
 import com.nova.companion.ui.theme.NovaTextSecondary
-import com.nova.companion.voice.ElevenLabsVoiceService
+import com.nova.companion.voice.NovaVoicePipeline
 
 // ─── Private color constants ──────────────────────────────────────────────────
 private val UserBubbleStart  = Color(0xFF6C2BD9)
@@ -117,18 +116,21 @@ fun ChatScreen(
     val modelState       by viewModel.modelState.collectAsState()
     val currentMode      by viewModel.currentMode.collectAsState()
     val isVoiceActive    by viewModel.isVoiceActive.collectAsState()
-    val elevenLabsState  by viewModel.elevenLabsConnectionState.collectAsState()
-    val isSpeaking       by viewModel.isElevenLabsSpeaking.collectAsState()
+    val pipelineState    by viewModel.voicePipelineState.collectAsState()
+    val voicePartialText by viewModel.voicePartialText.collectAsState()
     val auraState        by viewModel.auraState.collectAsState()
     val automationStatus by viewModel.automationStatus.collectAsState()
     val isOnline         by viewModel.isOnline.collectAsState()
 
     val listState = rememberLazyListState()
 
+    // Scroll to bottom when new messages arrive or streaming updates
     LaunchedEffect(messages.size, streamingText) {
-        if (messages.isNotEmpty() || streamingText.isNotEmpty()) {
-            val total = messages.size + if (streamingText.isNotEmpty() || isGenerating) 1 else 0
-            if (total > 0) listState.animateScrollToItem((total - 1).coerceAtLeast(0))
+        val total = messages.size + if (streamingText.isNotEmpty() || isGenerating) 1 else 0
+        if (total > 0) {
+            listState.animateScrollToItem(
+                (total - 1).coerceAtLeast(0)
+            )
         }
     }
 
@@ -184,7 +186,8 @@ fun ChatScreen(
                 Box(modifier = Modifier.weight(1f)) {
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
@@ -193,7 +196,11 @@ fun ChatScreen(
                         }
 
                         items(items = messages, key = { it.id }) { msg ->
-                            AnimatedBubble(message = msg)
+                            if (msg.isUser) {
+                                UserBubble(text = msg.content)
+                            } else {
+                                NovaBubble(text = msg.content, isStreaming = msg.isStreaming)
+                            }
                         }
 
                         if (streamingText.isNotEmpty()) {
@@ -223,11 +230,11 @@ fun ChatScreen(
                 }
 
                 // Voice overlay
-                AnimatedVisibility(visible = isVoiceActive && currentMode == NovaMode.VOICE_ELEVEN) {
+                AnimatedVisibility(visible = isVoiceActive) {
                     VoiceOverlay(
-                        state     = elevenLabsState,
-                        speaking  = isSpeaking,
-                        onEndCall = { viewModel.stopVoiceMode() }
+                        pipelineState = pipelineState,
+                        partialText   = voicePartialText,
+                        onEndCall     = { viewModel.stopVoiceMode() }
                     )
                 }
 
@@ -243,8 +250,7 @@ fun ChatScreen(
             }
         }
 
-        // Aura overlay — sits above everything
-        NovaAuraEffect(auraState = auraState, modifier = Modifier.fillMaxSize())
+        // Aura is rendered by AuraOverlayService (system overlay) — no in-app duplicate needed
     }
 }
 
@@ -269,9 +275,10 @@ private fun NovaTopBar(
     )
 
     val dotColor = when (auraState) {
-        AuraState.SURGE  -> NovaPurpleGlow
-        AuraState.ACTIVE -> NovaPurpleCore
-        AuraState.DORMANT -> NovaPurpleCore.copy(alpha = 0.35f)
+        AuraState.LISTENING -> NovaPurpleGlow
+        AuraState.SPEAKING  -> NovaPurpleGlow
+        AuraState.THINKING  -> NovaPurpleCore
+        AuraState.DORMANT   -> NovaPurpleCore.copy(alpha = 0.35f)
     }
 
     Box(
@@ -411,26 +418,6 @@ private fun NovaEmptyState() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Message bubbles
 // ─────────────────────────────────────────────────────────────────────────────
-
-@Composable
-private fun AnimatedBubble(message: ChatMessage) {
-    var visible by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { visible = true }
-
-    AnimatedVisibility(
-        visible = visible,
-        enter   = slideInVertically(
-            initialOffsetY = { it / 4 },
-            animationSpec  = tween(280, easing = FastOutSlowInEasing)
-        ) + fadeIn(animationSpec = tween(220))
-    ) {
-        if (message.isUser) {
-            UserBubble(text = message.content)
-        } else {
-            NovaBubble(text = message.content, isStreaming = message.isStreaming)
-        }
-    }
-}
 
 @Composable
 private fun UserBubble(text: String) {
@@ -835,25 +822,27 @@ private fun InputBar(
 
 @Composable
 private fun VoiceOverlay(
-    state:    ElevenLabsVoiceService.ConnectionState,
-    speaking: Boolean,
+    pipelineState: NovaVoicePipeline.PipelineState,
+    partialText: String,
     onEndCall: () -> Unit
 ) {
     val waveTransition = rememberInfiniteTransition(label = "wave")
-    val isActive = state == ElevenLabsVoiceService.ConnectionState.CONNECTED
+    val isActive = pipelineState == NovaVoicePipeline.PipelineState.LISTENING ||
+            pipelineState == NovaVoicePipeline.PipelineState.SPEAKING
 
-    val statusText = when (state) {
-        ElevenLabsVoiceService.ConnectionState.CONNECTING   -> "connecting..."
-        ElevenLabsVoiceService.ConnectionState.CONNECTED    -> if (speaking) "nova is speaking" else "listening"
-        ElevenLabsVoiceService.ConnectionState.ERROR        -> "connection error"
-        ElevenLabsVoiceService.ConnectionState.DISCONNECTED -> "disconnected"
+    val statusText = when (pipelineState) {
+        NovaVoicePipeline.PipelineState.IDLE       -> "ready"
+        NovaVoicePipeline.PipelineState.LISTENING   -> if (partialText.isNotBlank()) partialText else "listening..."
+        NovaVoicePipeline.PipelineState.THINKING    -> "thinking..."
+        NovaVoicePipeline.PipelineState.SPEAKING    -> "nova is speaking"
+        NovaVoicePipeline.PipelineState.ERROR       -> "error"
     }
-    val accent = when (state) {
-        ElevenLabsVoiceService.ConnectionState.CONNECTED    ->
-            if (speaking) NovaPurpleGlow else NovaPurpleCore
-        ElevenLabsVoiceService.ConnectionState.CONNECTING   -> NovaPurpleAmbient
-        ElevenLabsVoiceService.ConnectionState.ERROR        -> NovaRed
-        ElevenLabsVoiceService.ConnectionState.DISCONNECTED -> NovaTextDim
+    val accent = when (pipelineState) {
+        NovaVoicePipeline.PipelineState.LISTENING   -> NovaPurpleCore
+        NovaVoicePipeline.PipelineState.THINKING    -> NovaPurpleAmbient
+        NovaVoicePipeline.PipelineState.SPEAKING    -> NovaPurpleGlow
+        NovaVoicePipeline.PipelineState.ERROR       -> NovaRed
+        NovaVoicePipeline.PipelineState.IDLE        -> NovaTextDim
     }
 
     Box(
@@ -898,7 +887,10 @@ private fun VoiceOverlay(
                 style = MaterialTheme.typography.bodySmall.copy(
                     fontSize     = 13.sp,
                     letterSpacing = 0.5.sp
-                )
+                ),
+                maxLines = 2,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 24.dp)
             )
 
             // End call

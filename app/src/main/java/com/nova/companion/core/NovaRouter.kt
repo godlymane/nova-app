@@ -96,6 +96,29 @@ object NovaRouter {
         "call", "dial", "phone", "ring"
     )
 
+    // ── Teach-by-Demonstration Keywords ────────────────────
+    val TEACH_START_KEYWORDS = setOf(
+        "teach you", "let me teach", "show you how", "watch me",
+        "let me show", "learn this", "learn how", "i'll teach",
+        "i will teach", "watch what i do", "record this"
+    )
+
+    val TEACH_STOP_KEYWORDS = setOf(
+        "done teaching", "done", "did you get that", "got it",
+        "stop learning", "stop recording", "that's it", "thats it",
+        "finish teaching", "end teaching", "stop watching"
+    )
+
+    fun isTeachIntent(message: String): Boolean {
+        val lower = message.lowercase().trim()
+        return TEACH_START_KEYWORDS.any { lower.contains(it) }
+    }
+
+    fun isTeachStopIntent(message: String): Boolean {
+        val lower = message.lowercase().trim()
+        return TEACH_STOP_KEYWORDS.any { lower.contains(it) }
+    }
+
     // App-specific keywords — always route to AUTOMATION (these are unambiguous)
     private val AUTOMATION_APP_SPECIFIC_KEYWORDS = setOf(
         "swiggy", "zomato", "uber", "ola", "rapido",

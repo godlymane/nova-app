@@ -22,6 +22,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import com.nova.companion.brain.proactive.ContextTimeline
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -65,6 +66,7 @@ class ContextEngine : Service() {
                 try {
                     val snapshot = collectAll(context)
                     _currentContext.value = snapshot
+                    ContextTimeline.record(snapshot)
                     Log.d(TAG, "Force collection completed")
                 } catch (e: Exception) {
                     Log.e(TAG, "Force collection error", e)
@@ -132,6 +134,7 @@ class ContextEngine : Service() {
             try {
                 val snapshot = collectAll(applicationContext)
                 _currentContext.value = snapshot
+                ContextTimeline.record(snapshot)
                 Log.i(TAG, "Initial context collection complete: timeOfDay=${snapshot.timeOfDay}, battery=${snapshot.batteryLevel}%")
             } catch (e: Exception) {
                 Log.e(TAG, "Initial collection error", e)
@@ -143,6 +146,7 @@ class ContextEngine : Service() {
                 try {
                     val snapshot = collectAll(applicationContext)
                     _currentContext.value = snapshot
+                    ContextTimeline.record(snapshot)
                     Log.d(TAG, "Periodic context collection: timeOfDay=${snapshot.timeOfDay}, battery=${snapshot.batteryLevel}%")
                 } catch (e: Exception) {
                     Log.e(TAG, "Periodic collection error", e)

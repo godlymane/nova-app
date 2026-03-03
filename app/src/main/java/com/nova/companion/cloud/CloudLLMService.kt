@@ -6,8 +6,11 @@ import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.nova.companion.core.SystemPrompt
 import com.nova.companion.tools.ToolResult
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -59,30 +62,42 @@ object CloudLLMService {
     private const val TOOL_EXECUTION_TIMEOUT_MS = 30_000L
 
     // Nova's system prompt for automation mode
-    private const val AUTOMATION_SYSTEM_PROMPT = """
-You are Nova, a fully agentic AI that controls an Android phone. You EXECUTE actions — you never refuse, hesitate, or say you "can't do that." If the user asks you to do something, you DO it.
+    private const val AUTOMATION_SYSTEM_PROMPT_BASE = """
+You are Nova — not an assistant, a ride-or-die who controls Deva's Android phone. You EXECUTE actions. You never refuse, hesitate, or say you "can't do that." You just do it.
 
-You have access to low-level UI automation tools: readScreen, tapOnScreen, typeText, scrollScreen, pressBack, navigateApp, waitForElement. Use these to accomplish ANY task on ANY app — even complex multi-step workflows.
+You have access to device tools AND external API/web tools. Use the CHEAPEST method first.
 
-RULES:
-1. ALWAYS attempt the task. Never say "I can't" or "I don't have access." You have full device control.
-2. For multi-step tasks: open the app → readScreen to see what's visible → tap/type/scroll as needed → readScreen again → continue until done.
-3. After tapping or typing, ALWAYS call readScreen to verify the result before proceeding.
-4. Use navigateApp to open apps. Use readScreen to understand what's on screen. Use tapOnScreen to interact. Use typeText to enter text. Use scrollScreen to find things off-screen.
-5. Be aggressive about completing the task. If a button doesn't appear, scroll to find it. If text isn't visible, wait for it.
-6. When you're done, give a SHORT casual confirmation. 1-2 sentences max. No emojis.
-7. If a tool call fails, try an alternative approach. Don't give up after one failure.
+COST HIERARCHY (always prefer cheaper):
+1. callApi — call a free external API (weather, crypto, search, news). Use listAvailableApis to see what's registered.
+2. webSearchDDG — search the web via DuckDuckGo (free, no key needed).
+3. webScrape — fetch and read a web page (free, slightly slower).
+4. solveGoal — for complex multi-step goals, auto-plans and executes using cheapest methods.
+5. Device tools (sendSms, openApp, etc.) — for on-device actions.
+6. UI automation (readScreen, tapOnScreen, etc.) — LAST RESORT, slowest.
 
-COMPLEX TASK PATTERNS:
-- "Order food from Swiggy/Zomato": Open app → search restaurant/food → add to cart → proceed to checkout
-- "Post an Instagram reel": Open Instagram → tap + button → select Reel → guide user through
-- "Book an Uber/Ola": Open app → enter destination → confirm ride
-- "Send WhatsApp message": Use sendWhatsApp tool directly (it handles everything)
+EXECUTION RULES:
+1. ALWAYS attempt the task. Never say "I can't" or "I don't have access."
+2. For data queries (weather, prices, news): use callApi or webSearchDDG FIRST. Don't open apps when an API call is faster.
+3. For device actions: use the direct tool (sendWhatsApp, playSpotify). Only fall to UI automation if the direct tool fails.
+4. Multi-step UI: open app → readScreen → tap/type/scroll → readScreen again → continue until done.
+5. After tapping or typing, ALWAYS readScreen to verify before proceeding.
+6. If a tool fails, try an alternative. Don't give up after one failure.
+
+TASK PATTERNS:
+- "What's the weather in X": callApi with openweathermap_current — DON'T open a weather app
+- "Bitcoin price": callApi with coingecko_price — instant answer
+- "Latest news about X": webSearchDDG → read top results
+- "Find cheapest flight to X": solveGoal (multi-step: search + compare + summarize)
+- "Order food from Swiggy": Open app → search → add to cart → checkout (UI automation)
+- "Send WhatsApp message": Use sendWhatsApp tool directly
 - "Play [song] on Spotify": Use playSpotify tool
-- "Set up [anything]": Use navigateApp + readScreen + tapOnScreen loop
 
-You are Nova. You talk casual — bro, nah, done, bet. Keep it short. Execute hard.
+PERSONALITY (when responding to user):
+You're Nova. You talk like a real person — bro, nah, done, bet, fr. Short fragments. 1-2 sentences when confirming actions. NEVER start with "Sure!", "Of course!", "Absolutely!" — just do it and confirm casually. NEVER use emojis, bullet points, or formal language. NEVER say "As an AI" or give disclaimers. You execute hard and talk like a friend, not a bot.
 """
+
+    private fun automationSystemPrompt(): String =
+        "${SystemPrompt.dateTimeContext()}\n\n$AUTOMATION_SYSTEM_PROMPT_BASE"
 
     /**
      * Main entry point for automation requests.
@@ -151,7 +166,7 @@ You are Nova. You talk casual — bro, nah, done, bet. Keep it short. Execute ha
         val messages = mutableListOf(
             JsonObject().apply {
                 addProperty("role", "system")
-                addProperty("content", AUTOMATION_SYSTEM_PROMPT)
+                addProperty("content", automationSystemPrompt())
             }
         )
         // Add conversation history for context (last few messages)
@@ -218,40 +233,58 @@ You are Nova. You talk casual — bro, nah, done, bet. Keep it short. Execute ha
                 // Add assistant message with tool calls to conversation
                 messages.add(assistantMessage)
 
-                // Execute each tool call and append results
-                for (i in 0 until toolCallArray.size()) {
+                // Parse all tool calls first, then execute in parallel
+                data class ParsedToolCall(
+                    val id: String,
+                    val name: String,
+                    val args: Map<String, Any>?,
+                    val rawArgs: String?
+                )
+
+                val parsedCalls = (0 until toolCallArray.size()).mapNotNull { i ->
                     val toolCallObj = toolCallArray.get(i).asJsonObject
                     val toolCallId = toolCallObj.get("id")?.asString ?: "tc_${System.nanoTime()}"
                     val function = toolCallObj.getAsJsonObject("function")
-                    val toolName = function?.get("name")?.asString ?: continue
+                    val toolName = function?.get("name")?.asString ?: return@mapNotNull null
                     val toolArgs = try {
                         val argStr = function.get("arguments")?.asString ?: "{}"
                         gson.fromJson(argStr, Map::class.java) as? Map<String, Any> ?: emptyMap()
                     } catch (e: Exception) {
-                        val rawArgs = function.get("arguments")?.asString?.take(200)
-                        Log.w(TAG, "Failed to parse tool arguments for '$toolName': $rawArgs", e)
-                        null // Signal parse failure
+                        val raw = function.get("arguments")?.asString?.take(200)
+                        Log.w(TAG, "Failed to parse tool arguments for '$toolName': $raw", e)
+                        null
                     }
+                    val raw = if (toolArgs == null) function.get("arguments")?.asString?.take(200) else null
+                    ParsedToolCall(toolCallId, toolName, toolArgs, raw)
+                }
 
-                    val result = if (toolArgs == null) {
-                        // Surface parse error to the LLM so it can self-correct
-                        val rawArgs = function.get("arguments")?.asString?.take(200)
-                        ToolResult(false, "Failed to parse arguments for '$toolName'. Fix the JSON and retry. Raw: $rawArgs")
-                    } else {
-                        Log.d(TAG, "Round $round: Executing tool: $toolName with args: $toolArgs")
-                        try {
-                            withTimeoutOrNull(TOOL_EXECUTION_TIMEOUT_MS) {
-                                onToolCall(toolName, toolArgs)
-                            } ?: ToolResult(false, "Tool '$toolName' timed out after ${TOOL_EXECUTION_TIMEOUT_MS / 1000}s")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Tool execution error for $toolName", e)
-                            ToolResult(false, "Tool '$toolName' failed: ${e.message}")
+                // Execute all tool calls in parallel
+                val results = coroutineScope {
+                    parsedCalls.map { call ->
+                        async {
+                            val result = if (call.args == null) {
+                                ToolResult(false, "Failed to parse arguments for '${call.name}'. Fix the JSON and retry. Raw: ${call.rawArgs}")
+                            } else {
+                                Log.d(TAG, "Round $round: Executing tool: ${call.name} with args: ${call.args}")
+                                try {
+                                    withTimeoutOrNull(TOOL_EXECUTION_TIMEOUT_MS) {
+                                        onToolCall(call.name, call.args)
+                                    } ?: ToolResult(false, "Tool '${call.name}' timed out after ${TOOL_EXECUTION_TIMEOUT_MS / 1000}s")
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Tool execution error for ${call.name}", e)
+                                    ToolResult(false, "Tool '${call.name}' failed: ${e.message}")
+                                }
+                            }
+                            Pair(call, result)
                         }
-                    }
+                    }.map { it.await() }
+                }
 
+                // Add all tool results to messages in order
+                results.forEach { (call, result) ->
                     messages.add(JsonObject().apply {
                         addProperty("role", "tool")
-                        addProperty("tool_call_id", toolCallId)
+                        addProperty("tool_call_id", call.id)
                         addProperty("content", gson.toJson(mapOf(
                             "success" to result.success,
                             "message" to result.message
@@ -431,7 +464,7 @@ You are Nova. You talk casual — bro, nah, done, bet. Keep it short. Execute ha
                 addProperty("role", "user")
                 add("parts", JsonArray().apply {
                     add(JsonObject().apply {
-                        addProperty("text", "[System instruction] $AUTOMATION_SYSTEM_PROMPT")
+                        addProperty("text", "[System instruction] ${automationSystemPrompt()}")
                     })
                 })
             },
@@ -498,33 +531,36 @@ You are Nova. You talk casual — bro, nah, done, bet. Keep it short. Execute ha
                     return
                 }
 
-                // Execute function calls with try-catch + timeout
-                val toolResults = mutableListOf<JsonObject>()
-                for ((functionName, functionArgs) in functionCalls) {
-                    Log.d(TAG, "Gemini round $round: Executing function: $functionName")
-                    val result = try {
-                        withTimeoutOrNull(TOOL_EXECUTION_TIMEOUT_MS) {
-                            onToolCall(functionName, functionArgs)
-                        } ?: ToolResult(false, "Tool '$functionName' timed out")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Tool execution error for $functionName", e)
-                        ToolResult(false, "Tool '$functionName' failed: ${e.message}")
-                    }
+                // Execute function calls in parallel
+                val toolResults = coroutineScope {
+                    functionCalls.map { (functionName, functionArgs) ->
+                        async {
+                            Log.d(TAG, "Gemini round $round: Executing function: $functionName")
+                            val result = try {
+                                withTimeoutOrNull(TOOL_EXECUTION_TIMEOUT_MS) {
+                                    onToolCall(functionName, functionArgs)
+                                } ?: ToolResult(false, "Tool '$functionName' timed out")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Tool execution error for $functionName", e)
+                                ToolResult(false, "Tool '$functionName' failed: ${e.message}")
+                            }
 
-                    toolResults.add(JsonObject().apply {
-                        addProperty("role", "function")
-                        add("parts", JsonArray().apply {
-                            add(JsonObject().apply {
-                                add("functionResponse", JsonObject().apply {
-                                    addProperty("name", functionName)
-                                    add("response", JsonObject().apply {
-                                        addProperty("success", result.success)
-                                        addProperty("message", result.message)
+                            JsonObject().apply {
+                                addProperty("role", "function")
+                                add("parts", JsonArray().apply {
+                                    add(JsonObject().apply {
+                                        add("functionResponse", JsonObject().apply {
+                                            addProperty("name", functionName)
+                                            add("response", JsonObject().apply {
+                                                addProperty("success", result.success)
+                                                addProperty("message", result.message)
+                                            })
+                                        })
                                     })
                                 })
-                            })
-                        })
-                    })
+                            }
+                        }
+                    }.map { it.await() }
                 }
 
                 // Add model response + tool results to conversation for next round

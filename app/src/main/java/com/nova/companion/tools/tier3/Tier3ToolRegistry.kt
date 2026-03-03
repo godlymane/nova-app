@@ -15,5 +15,7 @@ object Tier3ToolRegistry {
         ShareContentToolExecutor.register(registry)
         TranslateTextToolExecutor.register(registry)
         QuickNoteToolExecutor.register(registry)
+        PostInstagramStoryToolExecutor.register(registry)
+        RunLearnedRoutineToolExecutor.register(registry)
     }
 }

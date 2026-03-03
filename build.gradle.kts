@@ -1,4 +1,11 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+buildscript {
+    dependencies {
+        classpath("io.objectbox:objectbox-gradle-plugin:4.0.3")
+    }
+}
+
 plugins {
     id("com.android.application") version "8.6.1" apply false
     id("org.jetbrains.kotlin.android") version "1.9.22" apply false

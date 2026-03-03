@@ -1,5 +1,6 @@
 package com.nova.companion.memory
 
+import android.content.Context
 import android.util.Log
 import com.nova.companion.data.NovaDatabase
 import com.nova.companion.data.dao.CategoryCount
@@ -11,18 +12,30 @@ import java.util.concurrent.TimeUnit
 /**
  * Nova's memory system — extracts, stores, recalls, and injects context.
  *
- * Operates fully offline using keyword matching and rule-based NLP.
- * No external APIs needed.
+ * Three-layer architecture:
+ * 1. Structured Facts (UserFact) — key-value pairs with confidence
+ * 2. Free-text Memories (Memory) — narrative context with embeddings
+ * 3. Knowledge Graph (GraphRAG) — entity-relationship triplets with vector+graph search
+ *
+ * Uses semantic search (OpenAI embeddings) for recall when online,
+ * with keyword fallback for offline scenarios.
  */
-class MemoryManager(private val db: NovaDatabase) {
+class MemoryManager(
+    private val db: NovaDatabase,
+    private val appContext: Context? = null
+) {
 
     companion object {
         private const val TAG = "MemoryManager"
         private const val MAX_CONTEXT_MEMORIES = 5
         private const val MAX_PROFILE_ENTRIES = 10
         private const val MAX_RECENT_SUMMARIES = 3
+        private const val MAX_GRAPH_TRIPLETS = 12
         private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd", Locale.US)
     }
+
+    /** Knowledge graph repository for GraphRAG — hybrid vector+graph traversal search */
+    val graphRepo = KnowledgeGraphRepository(db.knowledgeGraphDao(), appContext)
 
     // ────────────────────────────────────────────────────────────
     // STRUCTURED FACT EXTRACTION (Deep Memory)
@@ -235,12 +248,39 @@ class MemoryManager(private val db: NovaDatabase) {
         // Auto-extract profile updates
         extractProfileUpdates(msg, userMessage)
 
-        // Store non-duplicate memories
+        // Store non-duplicate memories (with embedding if online)
         for ((tag, memory) in extracted) {
             val existing = db.memoryDao().findExact(memory.content, memory.category)
             if (existing == null) {
-                db.memoryDao().insert(memory)
-                Log.d(TAG, "Extracted [$tag]: ${memory.content} (importance=${memory.importance})")
+                // Try to generate embedding for new memory
+                val embeddedMemory = if (appContext != null) {
+                    try {
+                        val embedding = SemanticSearch.embed(memory.content, appContext)
+                        if (embedding != null) {
+                            memory.copy(embedding = embedding.toByteArray())
+                        } else memory
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Embedding failed for new memory, storing without", e)
+                        memory
+                    }
+                } else memory
+
+                val roomId = db.memoryDao().insert(embeddedMemory)
+                Log.d(TAG, "Extracted [$tag]: ${memory.content} (importance=${memory.importance}, embedded=${embeddedMemory.embedding != null})")
+
+                // Dual-write: index into ObjectBox HNSW for fast vector search
+                if (embeddedMemory.embedding != null) {
+                    try {
+                        SemanticSearch.indexMemory(
+                            roomId = roomId,
+                            content = embeddedMemory.content,
+                            category = embeddedMemory.category,
+                            embedding = embeddedMemory.embedding!!.toFloatArray()
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "ObjectBox index failed for memory $roomId", e)
+                    }
+                }
             } else {
                 // Boost importance if mentioned again
                 db.memoryDao().boostImportance(existing.id, 1)
@@ -495,16 +535,45 @@ class MemoryManager(private val db: NovaDatabase) {
 
     /**
      * Find the most relevant memories for the current message.
-     * Scores by: keyword relevance * importance * recency
+     * Tries semantic search (embedding similarity) first when online,
+     * falls back to keyword scoring when offline or if semantic returns nothing.
      */
     suspend fun recall(currentMessage: String, limit: Int = MAX_CONTEXT_MEMORIES): List<Memory> {
+        // Try semantic search first if we have a context (online + API key)
+        if (appContext != null) {
+            try {
+                val allMemories = db.memoryDao().getAll()
+                val semanticResults = SemanticSearch.search(
+                    query = currentMessage,
+                    memories = allMemories,
+                    context = appContext,
+                    topK = limit
+                )
+                if (semanticResults.isNotEmpty()) {
+                    Log.d(TAG, "Semantic recall: ${semanticResults.size} results")
+                    semanticResults.forEach { db.memoryDao().markAccessed(it.id) }
+                    return semanticResults
+                }
+                Log.d(TAG, "Semantic search returned nothing — falling back to keyword")
+            } catch (e: Exception) {
+                Log.w(TAG, "Semantic search failed — falling back to keyword", e)
+            }
+        }
+
+        // Keyword-based fallback
+        return recallByKeyword(currentMessage, limit)
+    }
+
+    /**
+     * Keyword-based memory recall — original scoring algorithm.
+     * Used as fallback when semantic search is unavailable.
+     */
+    private suspend fun recallByKeyword(currentMessage: String, limit: Int): List<Memory> {
         val keywords = extractKeywords(currentMessage)
         if (keywords.isEmpty()) {
-            // Fall back to top importance memories
             return db.memoryDao().getTopMemories(limit)
         }
 
-        // Search for each keyword and score results
         val scoredMemories = mutableMapOf<Long, Pair<Memory, Double>>()
         val now = System.currentTimeMillis()
 
@@ -514,18 +583,15 @@ class MemoryManager(private val db: NovaDatabase) {
                 val existing = scoredMemories[memory.id]
                 val keywordScore = if (existing != null) existing.second + 1.0 else 1.0
 
-                // Recency bonus: memories from last 24h get 2x, last week 1.5x
                 val ageHours = TimeUnit.MILLISECONDS.toHours(now - memory.lastAccessed).coerceAtLeast(1)
                 val recencyMultiplier = when {
                     ageHours < 24 -> 2.0
-                    ageHours < 168 -> 1.5   // 7 days
-                    ageHours < 720 -> 1.0   // 30 days
+                    ageHours < 168 -> 1.5
+                    ageHours < 720 -> 1.0
                     else -> 0.5
                 }
 
-                // Access frequency bonus
                 val frequencyBonus = (memory.accessCount * 0.1).coerceAtMost(1.0)
-
                 val totalScore = keywordScore * memory.importance * recencyMultiplier + frequencyBonus
                 scoredMemories[memory.id] = memory to totalScore
             }
@@ -536,7 +602,6 @@ class MemoryManager(private val db: NovaDatabase) {
             .take(limit)
             .map { it.first }
             .also { memories ->
-                // Mark all recalled memories as accessed
                 memories.forEach { memory ->
                     db.memoryDao().markAccessed(memory.id)
                 }
@@ -577,7 +642,10 @@ class MemoryManager(private val db: NovaDatabase) {
 
     /**
      * Build the full memory context block for Nova's system prompt.
-     * Injects profile + relevant memories + recent daily summaries.
+     * Injects: profile + facts + graph sub-network + relevant memories + daily summaries.
+     *
+     * The knowledge graph is queried first — it provides structured relationships.
+     * Free-text memories fill in narrative context that the graph doesn't capture.
      */
     suspend fun buildContext(currentMessage: String): String {
         val parts = mutableListOf<String>()
@@ -591,20 +659,30 @@ class MemoryManager(private val db: NovaDatabase) {
             parts.add("USER PROFILE: " + profileParts.joinToString(" | "))
         }
 
-        // 2. Structured facts (new deep memory)
+        // 2. Structured facts (deep memory)
         val factsContext = buildFactsContext()
         if (factsContext.isNotBlank()) {
             parts.add(factsContext)
         }
 
-        // 3. Relevant memories
+        // 3. Knowledge graph sub-network (GraphRAG)
+        try {
+            val graphContext = graphRepo.buildGraphContext(currentMessage, MAX_GRAPH_TRIPLETS)
+            if (graphContext.isNotBlank()) {
+                parts.add(graphContext)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Graph context query failed, continuing without", e)
+        }
+
+        // 4. Relevant memories (free-text, semantic/keyword search)
         val memories = recall(currentMessage)
         if (memories.isNotEmpty()) {
             val memoriesStr = memories.joinToString("\n") { "- ${it.content}" }
             parts.add("RELEVANT MEMORIES:\n$memoriesStr")
         }
 
-        // 4. Recent daily summaries
+        // 5. Recent daily summaries
         val summaries = db.dailySummaryDao().getRecent(MAX_RECENT_SUMMARIES)
         if (summaries.isNotEmpty()) {
             val summariesStr = summaries.joinToString("\n") { "[${it.date}]: ${it.summary}" }
@@ -725,11 +803,18 @@ class MemoryManager(private val db: NovaDatabase) {
         val totalSummaries = db.dailySummaryDao().count()
         val byCategory = db.memoryDao().getCountByCategoryRaw()
             .associate { it.category to it.cnt }
+        val graphStats = try {
+            graphRepo.getStats()
+        } catch (e: Exception) {
+            KnowledgeGraphRepository.GraphStats(0, 0)
+        }
         return MemoryStats(
             totalMemories = totalMemories,
             totalFacts = totalFacts,
             totalSummaries = totalSummaries,
-            byCategory = byCategory
+            byCategory = byCategory,
+            graphNodes = graphStats.nodeCount,
+            graphEdges = graphStats.edgeCount
         )
     }
 
@@ -737,7 +822,9 @@ class MemoryManager(private val db: NovaDatabase) {
         val totalMemories: Int,
         val totalFacts: Int,
         val totalSummaries: Int,
-        val byCategory: Map<String, Int>
+        val byCategory: Map<String, Int>,
+        val graphNodes: Int = 0,
+        val graphEdges: Int = 0
     )
 
     // ────────────────────────────────────────────────────────────
@@ -746,6 +833,7 @@ class MemoryManager(private val db: NovaDatabase) {
 
     /**
      * Run memory importance decay for memories not accessed recently.
+     * Also runs knowledge graph maintenance (edge decay + pruning).
      * Should be called on app startup.
      */
     suspend fun runDecay() {
@@ -753,6 +841,13 @@ class MemoryManager(private val db: NovaDatabase) {
         db.memoryDao().decayUnaccessed(oneWeekAgo)
         val deleted = db.memoryDao().deleteDecayed()
         Log.d(TAG, "Decay complete: $deleted dead memories removed")
+
+        // Graph maintenance: decay old edges, prune weak edges + orphaned nodes
+        try {
+            graphRepo.runMaintenance()
+        } catch (e: Exception) {
+            Log.w(TAG, "Graph maintenance failed", e)
+        }
     }
 
     /**
@@ -764,11 +859,47 @@ class MemoryManager(private val db: NovaDatabase) {
     }
 
     /**
-     * Process a completed conversation exchange: extract memories and structured facts.
+     * Process a completed conversation exchange:
+     * 1. Extract free-text memories (regex patterns)
+     * 2. Extract structured facts (regex patterns)
+     * 3. Extract knowledge graph triplets (LLM-based or regex fallback)
+     *
      * Called by ViewModels after Nova responds.
      */
     suspend fun processConversation(userMessage: String, novaResponse: String) {
         extractMemories(userMessage, novaResponse)
         extractAndStoreFacts(userMessage, novaResponse)
+        extractGraphTriplets(userMessage, novaResponse)
+    }
+
+    /**
+     * Extract Node-Edge-Node triplets from the conversation and insert into the knowledge graph.
+     * Uses LLM when online, regex fallback when offline.
+     */
+    private suspend fun extractGraphTriplets(userMessage: String, novaResponse: String) {
+        try {
+            val triplets = if (appContext != null) {
+                GraphTripletExtractor.extract(userMessage, novaResponse, appContext)
+            } else {
+                emptyList()
+            }
+
+            for (triplet in triplets) {
+                graphRepo.insertTriplet(
+                    node1Label = triplet.node1,
+                    node1Type = triplet.node1Type,
+                    edgeRelation = triplet.edge,
+                    node2Label = triplet.node2,
+                    node2Type = triplet.node2Type,
+                    contextSnippet = userMessage.take(150)
+                )
+            }
+
+            if (triplets.isNotEmpty()) {
+                Log.d(TAG, "Graph: inserted ${triplets.size} triplets from conversation")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Graph triplet extraction failed", e)
+        }
     }
 }

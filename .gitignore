@@ -6,6 +6,13 @@ models/*.gguf
 models/*.bin
 !models/.gitkeep
 *.gguf
+dist/
+mlc-llm/
+mlc-chat-ext/
+NUL
+*.zip
+*.so
+*.aar
 
 # Build outputs
 src/app/dist/

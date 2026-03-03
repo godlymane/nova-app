@@ -1,5 +1,6 @@
 package com.nova.companion.tools
 
+import com.nova.companion.negotiation.NegotiationEngine
 import com.nova.companion.tools.tier1.Tier1ToolRegistry
 import com.nova.companion.tools.tier2.Tier2ToolRegistry
 import com.nova.companion.tools.tier3.Tier3ToolRegistry
@@ -16,6 +17,9 @@ object NovaToolRegistry {
         Tier2ToolRegistry.registerAll(registry)
         Tier3ToolRegistry.registerAll(registry)
         Tier4ToolRegistry.registerAll(registry)
+
+        // Phase 7: Dynamic Tool Negotiation — external APIs, web scraping, goal planning
+        NegotiationEngine.initialize()
     }
 
     /**
