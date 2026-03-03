@@ -139,6 +139,17 @@ object NovaRouter {
         "photo", "camera", "note", "email", "mail"
     )
 
+    // ── Pre-compiled word-boundary regex cache ──────────────────
+
+    // Pre-compiled word-boundary regex patterns for all keyword sets
+    private val WORD_BOUNDARY_CACHE = mutableMapOf<String, Regex>()
+
+    private fun getWordBoundaryRegex(keyword: String): Regex {
+        return WORD_BOUNDARY_CACHE.getOrPut(keyword) {
+            Regex("\\b${Regex.escape(keyword)}\\b")
+        }
+    }
+
     // ── Routing Logic ────────────────────────────────────────────
 
     /**
@@ -180,15 +191,6 @@ object NovaRouter {
         }
     }
 
-    /**
-     * Classify the current mode based on context and user preference.
-     *
-     * Used to determine if we should stay in current mode or switch.
-     * For example, in voice mode, we track text vs voice classification.
-     *
-     * @param message User's message
-     * @return The appropriate NovaMode
-     */
     /**
      * Classify a message's intent without needing context (no network checks).
      * Returns AUTOMATION if automation intent detected, TEXT_LOCAL otherwise.
@@ -245,8 +247,8 @@ object NovaRouter {
 
         // Check for music/media control (play, pause, skip, etc.)
         if (containsAnyWord(message, AUTOMATION_MUSIC_KEYWORDS)) {
-            // Must be a command, not just mentioning music
-            return message.startsWith("play") || message.startsWith("pause") ||
+            // Must contain a command word, not just mention music
+            return message.contains("play") || message.startsWith("pause") ||
                     message.startsWith("skip") || message.startsWith("next") ||
                     message.startsWith("previous") || message.startsWith("stop") ||
                     message.startsWith("resume")
@@ -378,34 +380,33 @@ object NovaRouter {
     // ── Helper Functions ────────────────────────────────────────
 
     /**
-     * Check if message contains any of the given keywords.
+     * Check if message contains any of the given keywords using pre-compiled
+     * word-boundary regex patterns to avoid substring false positives.
+     * e.g. "play" should not match "display", "set" should not match "sunset"
      */
     private fun containsAnyWord(text: String, keywords: Set<String>): Boolean {
         return keywords.any { keyword ->
-            // Use word boundary matching to avoid substring false positives
-            // e.g. "play" should not match "display", "set" should not match "sunset"
-            val pattern = "\\b${Regex.escape(keyword)}\\b"
-            Regex(pattern).containsMatchIn(text)
+            getWordBoundaryRegex(keyword).containsMatchIn(text)
         }
     }
 
     /**
-     * Extract app name from message like "open spotify" -> "spotify".
-     * Useful for automation mode to determine which app to launch.
+     * Extract app name from message like "open spotify music" -> "spotify music".
+     * Captures multi-word app names, useful for automation mode.
      */
     fun extractAppName(message: String): String? {
         val lower = message.lowercase()
         val patterns = listOf(
-            "open (\\w+)".toRegex(),
-            "launch (\\w+)".toRegex(),
-            "start (\\w+)".toRegex(),
-            "run (\\w+)".toRegex()
+            "open ([\\w\\s]+?)(?:\\s+app)?$".toRegex(),
+            "launch ([\\w\\s]+?)(?:\\s+app)?$".toRegex(),
+            "start ([\\w\\s]+?)(?:\\s+app)?$".toRegex(),
+            "run ([\\w\\s]+?)(?:\\s+app)?$".toRegex()
         )
 
         for (pattern in patterns) {
             val match = pattern.find(lower)
             if (match != null) {
-                return match.groupValues[1]
+                return match.groupValues[1].trim()
             }
         }
 
@@ -413,19 +414,20 @@ object NovaRouter {
     }
 
     /**
-     * Extract contact name from messaging requests like "send message to john" -> "john".
+     * Extract contact name from messaging requests like "send message to john doe" -> "john doe".
+     * Captures multi-word contact names.
      */
     fun extractContactName(message: String): String? {
         val lower = message.lowercase()
         val patterns = listOf(
-            "(?:send|text|message) (?:to |a message to )?(\\w+)".toRegex(),
-            "(?:text|message) (\\w+)".toRegex()
+            "(?:send|text|message) (?:to |a message to )([\\w\\s]+)$".toRegex(),
+            "(?:text|message) ([\\w\\s]+)$".toRegex()
         )
 
         for (pattern in patterns) {
             val match = pattern.find(lower)
             if (match != null) {
-                return match.groupValues[1]
+                return match.groupValues[1].trim()
             }
         }
 

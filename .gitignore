@@ -1,45 +1,28 @@
-# Dependencies
-node_modules/
-
-# Models (too large for git)
-models/*.gguf
-models/*.bin
-!models/.gitkeep
-*.gguf
-dist/
-mlc-llm/
-mlc-chat-ext/
-NUL
-*.zip
-*.so
-*.aar
-
-# Build outputs
-src/app/dist/
-src/app/android/app/build/
-app/build/
-build/
-*.apk
-*.aab
-
-# Gradle
-.gradle/
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
 local.properties
 
-# Native build
-app/src/main/cpp/llama.cpp/
-app/.cxx/
-.externalNativeBuild/
+# Sensitive files
+*.db
 
-# IDE
-.idea/
-.vscode/
-*.iml
+# Build logs
+build_output*.txt
+build_log.txt
 
-# OS
-.DS_Store
-Thumbs.db
+# Windows batch scripts
+*.bat
 
-# Logs
-*.log
-npm-debug.log*
+# Claude config
+.claude/
