@@ -487,11 +487,35 @@ object NovaVoicePipeline {
             val wavData = pcmToWav(audioData.toByteArray())
             Log.i(TAG, "Sending ${wavData.size / 1024}KB WAV to Whisper API")
 
-            // Transcribe with Whisper
-            val transcription = transcribeWithWhisper(wavData)
+            // Transcribe with Whisper (with one retry on failure)
+            var transcription: String? = null
+            try {
+                transcription = transcribeWithWhisper(wavData)
+            } catch (e: Throwable) {
+                Log.e(TAG, "Whisper transcription failed", e)
+            }
 
-            if (transcription.isNullOrBlank()) {
-                Log.w(TAG, "Whisper returned empty transcription")
+            // Retry once if Whisper failed (network error, timeout, etc.)
+            if (transcription == null) {
+                Log.i(TAG, "Retrying Whisper transcription after 500ms delay")
+                try {
+                    delay(500)
+                    transcription = transcribeWithWhisper(wavData)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Whisper transcription retry also failed", e)
+                }
+            }
+
+            // If still null after retry, speak error and let user retry via follow-up
+            if (transcription == null) {
+                Log.w(TAG, "Whisper transcription failed after retry")
+                scope?.launch { _assistantMessageEvent.emit("Sorry, I couldn't catch that. Try again.") }
+                speakResponse("Sorry, I couldn't catch that. Try again.")
+                return
+            }
+
+            if (transcription.isBlank()) {
+                Log.i(TAG, "Whisper returned empty transcription (no speech detected)")
                 endSession()
                 return
             }

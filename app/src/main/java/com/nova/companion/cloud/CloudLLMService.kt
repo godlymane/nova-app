@@ -563,10 +563,23 @@ You're Nova. You talk like a real person — bro, nah, done, bet, fr. Short frag
                     }.map { it.await() }
                 }
 
+                // Handle null/empty parts (safety block, error, or empty response)
+                if (parts == null || parts.size() == 0) {
+                    val finishReason = candidate.get("finishReason")?.asString
+                    if (finishReason == "SAFETY") {
+                        Log.w(TAG, "Gemini response blocked by safety filters")
+                        onError("Response was blocked by safety filters. Try rephrasing your request.")
+                        return
+                    }
+                    Log.w(TAG, "Gemini returned empty parts (finishReason=$finishReason)")
+                    onError("Gemini returned an empty response. Try again.")
+                    return
+                }
+
                 // Add model response + tool results to conversation for next round
                 contents.add(JsonObject().apply {
                     addProperty("role", "model")
-                    add("parts", parts!!)
+                    add("parts", parts)
                 })
                 contents.addAll(toolResults)
                 // Loop continues — next iteration sends results back to Gemini

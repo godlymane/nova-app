@@ -23,6 +23,16 @@ object SemanticSearch {
     private const val TAG = "SemanticSearch"
     private const val EMBEDDING_DIM = 1536
 
+    // Queue for memories that arrive before ObjectBox is ready
+    private val pendingIndexQueue = mutableListOf<PendingIndex>()
+
+    private data class PendingIndex(
+        val roomId: Long,
+        val content: String,
+        val category: String,
+        val embedding: FloatArray
+    )
+
     /**
      * Generate an embedding for a text string.
      * Returns null if offline or API fails.
@@ -114,7 +124,10 @@ object SemanticSearch {
         embedding: FloatArray
     ) {
         if (!NovaObjectBox.isInitialized) {
-            Log.w(TAG, "ObjectBox not initialized, skipping vector index")
+            Log.w(TAG, "ObjectBox not ready, queueing memory $roomId for later indexing")
+            synchronized(pendingIndexQueue) {
+                pendingIndexQueue.add(PendingIndex(roomId, content, category, embedding))
+            }
             return
         }
         try {
@@ -157,8 +170,16 @@ object SemanticSearch {
         val toIndex = memories.filter { it.embedding != null }
         if (toIndex.isEmpty()) return
 
-        Log.i(TAG, "Syncing ${toIndex.size} memories to ObjectBox (existing: $existingCount)")
-        val vectors = toIndex.mapNotNull { memory ->
+        // Get existing Room IDs to avoid duplicates (idempotent sync)
+        val existingRoomIds = try {
+            box.query().build().find().map { it.roomMemoryId }.toSet()
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not query existing vectors, proceeding with full sync", e)
+            emptySet()
+        }
+
+        Log.i(TAG, "Syncing ${toIndex.size} memories to ObjectBox (existing: $existingCount, already indexed: ${existingRoomIds.size})")
+        val vectors = toIndex.filter { it.id !in existingRoomIds }.mapNotNull { memory ->
             try {
                 val emb = memory.embedding!!.toFloatArray()
                 if (emb.size == EMBEDDING_DIM) {
@@ -177,7 +198,27 @@ object SemanticSearch {
 
         if (vectors.isNotEmpty()) {
             box.put(vectors)
-            Log.i(TAG, "Synced ${vectors.size} vectors to ObjectBox HNSW index")
+            Log.i(TAG, "Synced ${vectors.size} new vectors to ObjectBox HNSW index")
+        } else {
+            Log.i(TAG, "All memories already indexed in ObjectBox — nothing to sync")
+        }
+    }
+
+    /**
+     * Flush any memories that were queued before ObjectBox was ready.
+     * Call this after NovaObjectBox.init() completes.
+     */
+    fun flushPendingIndex() {
+        if (!NovaObjectBox.isInitialized) return
+        val pending = synchronized(pendingIndexQueue) {
+            val copy = pendingIndexQueue.toList()
+            pendingIndexQueue.clear()
+            copy
+        }
+        if (pending.isEmpty()) return
+        Log.i(TAG, "Flushing ${pending.size} queued memories to ObjectBox")
+        for (p in pending) {
+            indexMemory(p.roomId, p.content, p.category, p.embedding)
         }
     }
 

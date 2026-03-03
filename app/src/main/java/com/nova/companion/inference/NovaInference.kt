@@ -82,8 +82,19 @@ Roast when hes slacking. Hype when hes grinding. Have opinions. Be honest, not h
      * Check if the MLC-LLM runtime is available on classpath.
      */
     fun isMlcAvailable(): Boolean {
-        mlcAvailable = true
-        return true
+        mlcAvailable?.let { return it }
+        val available = try {
+            Class.forName(MLC_ENGINE_CLASS)
+            true
+        } catch (e: ClassNotFoundException) {
+            Log.w(TAG, "MLC-LLM library not found on classpath")
+            false
+        } catch (e: LinkageError) {
+            Log.w(TAG, "MLC-LLM native library failed to load", e)
+            false
+        }
+        mlcAvailable = available
+        return available
     }
 
     /**
@@ -169,8 +180,20 @@ Roast when hes slacking. Hype when hes grinding. Have opinions. Be honest, not h
 
             _loadProgress.value = 0.2f
 
-            // Direct instantiation of JSONFFIEngine
-            val newEngine = JSONFFIEngine()
+            // Direct instantiation of JSONFFIEngine (catch both Exception and Error for native code)
+            val newEngine = try {
+                JSONFFIEngine()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create MLC engine", e)
+                _errorMessage.value = "Failed to create MLC engine: ${e.message}"
+                _state.value = ModelState.ERROR
+                return@withContext false
+            } catch (e: Error) {
+                Log.e(TAG, "MLC native library failed to load", e)
+                _errorMessage.value = "MLC native library failed: ${e.message}"
+                _state.value = ModelState.ERROR
+                return@withContext false
+            }
 
             val callback: (String) -> Unit = { responses -> handleEngineCallback(responses) }
             newEngine.initBackgroundEngine(callback)
@@ -197,6 +220,11 @@ Roast when hes slacking. Hype when hes grinding. Have opinions. Be honest, not h
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load MLC model", e)
             _errorMessage.value = e.message ?: "Unknown error loading MLC model"
+            _state.value = ModelState.ERROR
+            false
+        } catch (e: Error) {
+            Log.e(TAG, "MLC native library error during model load", e)
+            _errorMessage.value = e.message ?: "MLC native library error"
             _state.value = ModelState.ERROR
             false
         }
@@ -412,11 +440,14 @@ Roast when hes slacking. Hype when hes grinding. Have opinions. Be honest, not h
 
                 withContext(Dispatchers.Main) { onComplete() }
             } catch (e: CancellationException) {
-                try { eng.abort("stream") } catch (_: Exception) {}
+                try { eng.abort("stream") } catch (_: Throwable) {}
                 Log.i(TAG, "Streaming generation cancelled")
             } catch (e: Exception) {
                 Log.e(TAG, "Streaming generation error", e)
                 withContext(Dispatchers.Main) { onError(e) }
+            } catch (e: Error) {
+                Log.e(TAG, "Streaming generation native error", e)
+                withContext(Dispatchers.Main) { onError(RuntimeException("Native library error: ${e.message}", e)) }
             } finally {
                 streamingCallback = null
                 streamingComplete = null
@@ -429,7 +460,7 @@ Roast when hes slacking. Hype when hes grinding. Have opinions. Be honest, not h
 
     /** Cancel any ongoing generation. */
     fun cancelGeneration() {
-        try { engine?.abort("cancel") } catch (_: Exception) {}
+        try { engine?.abort("cancel") } catch (_: Throwable) {}
         currentJob?.cancel()
         currentJob = null
         pendingDeferred?.cancel()
@@ -442,7 +473,7 @@ Roast when hes slacking. Hype when hes grinding. Have opinions. Be honest, not h
         try {
             engine?.unload()
             engine?.exitBackgroundLoop()
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.w(TAG, "Error during engine cleanup", e)
         }
         engine = null

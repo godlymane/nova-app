@@ -407,13 +407,17 @@ object InferenceRouter {
 
         Log.i(TAG, "Routing to local NovaInference")
         try {
+            val fullText = StringBuilder()
             val job = NovaInference.generateStreaming(
                 userMessage = userMessage,
                 history = conversationHistory,
                 memoryContext = memoryContext,
                 scope = CoroutineScope(Dispatchers.Default),
-                onToken = onToken,
-                onComplete = { onComplete("") }, // NovaInference onComplete doesn't pass full text — caller reads from onToken accumulation
+                onToken = { token ->
+                    fullText.append(token)
+                    onToken(token)
+                },
+                onComplete = { onComplete(fullText.toString().trim()) },
                 onError = onError
             )
             job.join()

@@ -197,39 +197,44 @@ object LocalInferenceClient {
                 }
 
                 // Try to parse tool calls from the output
-                val toolCall = parseToolCall(rawOutput)
+                val parsedToolCalls = parseToolCalls(rawOutput)
 
-                if (toolCall == null) {
+                if (parsedToolCalls.isEmpty()) {
                     // No tool call — this is the final response
                     val cleanResponse = cleanToolResponse(rawOutput)
                     withContext(Dispatchers.Main) { onResponse(cleanResponse) }
                     return@withContext
                 }
 
-                // Execute the tool
-                val (toolName, toolArgs) = toolCall
-                Log.i(TAG, "Local tool call: $toolName($toolArgs)")
-                withContext(Dispatchers.Main) { onToolCall(toolName) }
+                // Execute all parsed tool calls and collect results
+                val roundResults = mutableListOf<Pair<String, String>>()
+                for ((toolName, toolArgs) in parsedToolCalls) {
+                    Log.i(TAG, "Local tool call: $toolName($toolArgs)")
+                    withContext(Dispatchers.Main) { onToolCall(toolName) }
 
-                val tool = ToolRegistry.getTool(toolName)
-                val result = if (tool != null && offlineToolNames.contains(toolName)) {
-                    try {
-                        tool.executor(context, toolArgs)
-                    } catch (e: Exception) {
-                        ToolResult(false, "Tool error: ${e.message}")
+                    val tool = ToolRegistry.getTool(toolName)
+                    val result = if (tool != null && offlineToolNames.contains(toolName)) {
+                        try {
+                            tool.executor(context, toolArgs)
+                        } catch (e: Exception) {
+                            ToolResult(false, "Tool error: ${e.message}")
+                        }
+                    } else {
+                        ToolResult(false, "Tool '$toolName' not available offline")
                     }
-                } else {
-                    ToolResult(false, "Tool '$toolName' not available offline")
+
+                    roundResults.add(toolName to result.message)
+                    toolResults.add(toolName to result.message)
                 }
 
-                toolResults.add(toolName to result.message)
-
-                // Build continuation prompt with tool result
+                // Build continuation prompt with all tool results
                 currentPrompt = buildString {
                     append(currentPrompt)
                     append(rawOutput)
-                    append("\n\nTool result for $toolName: ${result.message}\n")
-                    append("Now respond to the user naturally about what happened.\n### Assistant:\n")
+                    for ((toolName, resultMsg) in roundResults) {
+                        append("\n\nTool result for $toolName: $resultMsg")
+                    }
+                    append("\nNow respond to the user naturally about what happened.\n### Assistant:\n")
                 }
 
                 round++
@@ -277,30 +282,66 @@ object LocalInferenceClient {
     // ── Response Parsing ─────────────────────────────────────────────
 
     /**
-     * Parse a TOOL_CALL from model output.
+     * Parse all TOOL_CALL blocks from model output using brace-counting.
+     * Handles nested JSON (e.g., args containing braces) and multiple tool calls.
      * Expected format: TOOL_CALL: {"name": "toolName", "args": {"param": "value"}}
      *
-     * @return Pair of (toolName, argsMap) or null if no tool call found
+     * @return List of (toolName, argsMap) pairs, empty if no valid tool calls found
      */
-    private fun parseToolCall(output: String): Pair<String, Map<String, Any>>? {
-        val toolCallRegex = Regex("""TOOL_CALL:\s*(\{.*\})""", RegexOption.DOT_MATCHES_ALL)
-        val match = toolCallRegex.find(output) ?: return null
+    private fun parseToolCalls(output: String): List<Pair<String, Map<String, Any>>> {
+        if (!output.contains("TOOL_CALL:")) return emptyList()
 
-        return try {
-            val json = JSONObject(match.groupValues[1])
-            val name = json.getString("name")
-            val argsJson = json.optJSONObject("args") ?: JSONObject()
-            val args = mutableMapOf<String, Any>()
+        val jsonBlocks = extractJsonBlocks(output)
+        val results = mutableListOf<Pair<String, Map<String, Any>>>()
 
-            argsJson.keys().forEach { key ->
-                args[key] = argsJson.get(key)
+        for (jsonStr in jsonBlocks) {
+            try {
+                val json = JSONObject(jsonStr)
+                val name = json.getString("name")
+                val argsJson = json.optJSONObject("args") ?: JSONObject()
+                val args = mutableMapOf<String, Any>()
+
+                argsJson.keys().forEach { key ->
+                    args[key] = argsJson.get(key)
+                }
+
+                results.add(name to args)
+            } catch (e: Exception) {
+                Log.w(TAG, "Skipping malformed tool call JSON: ${jsonStr.take(200)}", e)
             }
-
-            name to args
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse tool call: ${e.message}")
-            null
         }
+
+        return results
+    }
+
+    /**
+     * Extract JSON blocks following TOOL_CALL: markers using brace-counting.
+     * Handles nested objects correctly (e.g., args containing braces in values).
+     */
+    private fun extractJsonBlocks(text: String): List<String> {
+        val results = mutableListOf<String>()
+        val prefix = "TOOL_CALL:"
+        var searchFrom = 0
+        while (true) {
+            val idx = text.indexOf(prefix, searchFrom)
+            if (idx == -1) break
+            val braceStart = text.indexOf('{', idx + prefix.length)
+            if (braceStart == -1) break
+            var depth = 0
+            var i = braceStart
+            while (i < text.length) {
+                when (text[i]) {
+                    '{' -> depth++
+                    '}' -> { depth--; if (depth == 0) break }
+                }
+                i++
+            }
+            if (depth == 0) {
+                results.add(text.substring(braceStart, i + 1))
+            }
+            searchFrom = i + 1
+        }
+        return results
     }
 
     /**
