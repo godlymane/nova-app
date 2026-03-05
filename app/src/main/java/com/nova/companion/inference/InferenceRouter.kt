@@ -471,8 +471,8 @@ object InferenceRouter {
         }
 
         val fullResponse = StringBuilder()
-        @Volatile var lastTokenTime = System.currentTimeMillis()
-        @Volatile var streamDone = false
+        var lastTokenTime = System.currentTimeMillis()
+        var streamDone = false
 
         // Timeout watchdog — cancels the HTTP call if no tokens arrive for 30s.
         // The BufferedReader.readLine() blocks on the socket; cancelling the OkHttp

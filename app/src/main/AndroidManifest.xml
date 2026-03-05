@@ -52,6 +52,7 @@
 
     <!-- Calendar -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
 
     <!-- Location (foreground service type) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
@@ -62,6 +63,11 @@
 
     <!-- Foreground service type for ContextEngine -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- ========== HEALTH & FITNESS ========== -->
+
+    <!-- Step counter / activity recognition (API 29+) -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
 
     <!-- ========== VISION / SCREENSHOT PERMISSION ========== -->
 
@@ -182,17 +188,6 @@
                 android:value="Nova context collection for personalized assistance" />
         </service>
 
-        <!-- ========== AURA OVERLAY SERVICE ========== -->
-
-        <service
-            android:name=".overlay.AuraOverlayService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Nova ambient aura visual overlay" />
-        </service>
-
         <!-- ========== TASK BUBBLE OVERLAY SERVICE ========== -->
 
         <service
@@ -202,6 +197,28 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Nova floating task progress overlay" />
+        </service>
+
+        <!-- ========== AURA OVERLAY SERVICE ========== -->
+
+        <service
+            android:name=".overlay.AuraOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Nova reactive aura overlay for voice state visualization" />
+        </service>
+
+        <!-- ========== SUBLIMINAL STROBE SERVICE ========== -->
+
+        <service
+            android:name=".biohack.hypnosis.SubliminalStrobeService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Subliminal screen flash for neural frequency entrainment" />
         </service>
 
         <!-- ========== VISION SCREENSHOT SERVICE ========== -->

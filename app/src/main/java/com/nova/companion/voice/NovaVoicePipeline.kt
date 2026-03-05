@@ -3,6 +3,8 @@ package com.nova.companion.voice
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.database.Cursor
+import android.provider.ContactsContract
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -12,6 +14,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.nova.companion.BuildConfig
 import com.nova.companion.accessibility.ScreenContext
 import com.nova.companion.cloud.CloudConfig
 import com.nova.companion.cloud.CloudLLMService
@@ -195,17 +198,13 @@ object NovaVoicePipeline {
 
     fun isActive(): Boolean = _state.value != PipelineState.IDLE
 
-    /**
-     * Push current pipeline state directly to the overlay service.
-     * This is the primary path — ensures the Dynamic Island reflects voice state
-     * even when ChatViewModel isn't alive (background wake-word sessions).
-     */
+    /** Map pipeline state to AuraState and forward to overlay. */
     private fun pushAuraState(pipelineState: PipelineState) {
         val aura = when (pipelineState) {
             PipelineState.LISTENING -> AuraState.LISTENING
             PipelineState.THINKING -> AuraState.THINKING
             PipelineState.SPEAKING -> AuraState.SPEAKING
-            PipelineState.IDLE, PipelineState.ERROR -> AuraState.DORMANT
+            else -> AuraState.DORMANT
         }
         AuraOverlayService.updateAuraState(aura)
     }
@@ -485,17 +484,35 @@ object NovaVoicePipeline {
             WakeWordService.updateStatus("Processing your request...")
 
             val wavData = pcmToWav(audioData.toByteArray())
-            Log.i(TAG, "Sending ${wavData.size / 1024}KB WAV to Whisper API")
+            Log.i(TAG, "Sending ${wavData.size / 1024}KB WAV for transcription")
 
-            // Transcribe with Whisper (with one retry on failure)
+            // Load contact first names for STT keyword biasing (fixes "Raul" → "Rahul")
+            val contactKeywords = loadContactKeywords(context)
+
+            // Transcription: try Deepgram first (more accurate, Indian English, name biasing)
+            // fall back to OpenAI Whisper if Deepgram key not set or call fails
             var transcription: String? = null
-            try {
-                transcription = transcribeWithWhisper(wavData)
-            } catch (e: Throwable) {
-                Log.e(TAG, "Whisper transcription failed", e)
+
+            if (BuildConfig.DEEPGRAM_API_KEY.isNotBlank()) {
+                try {
+                    Log.i(TAG, "Transcribing with Deepgram (${contactKeywords.size} contact keywords)")
+                    transcription = transcribeWithDeepgram(wavData, contactKeywords)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Deepgram transcription failed, falling back to Whisper", e)
+                }
             }
 
-            // Retry once if Whisper failed (network error, timeout, etc.)
+            // Fallback: OpenAI Whisper
+            if (transcription == null) {
+                try {
+                    Log.i(TAG, "Transcribing with OpenAI Whisper")
+                    transcription = transcribeWithWhisper(wavData)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Whisper transcription failed", e)
+                }
+            }
+
+            // Retry Whisper once on failure
             if (transcription == null) {
                 Log.i(TAG, "Retrying Whisper transcription after 500ms delay")
                 try {
@@ -593,6 +610,96 @@ object NovaVoicePipeline {
             Log.e(TAG, "Failed to parse Whisper response: $responseBody", e)
             null
         }
+    }
+
+    /**
+     * Transcribe audio using Deepgram nova-2 API.
+     * - Uses en-IN (Indian English) for better accuracy on Indian names/accents
+     * - Passes contact first names as keywords so "Raul" → "Rahul", etc.
+     */
+    private fun transcribeWithDeepgram(wavData: ByteArray, keywords: List<String>): String? {
+        val apiKey = BuildConfig.DEEPGRAM_API_KEY
+        if (apiKey.isBlank()) return null
+
+        val keywordParam = keywords.take(50)
+            .filter { it.isNotBlank() }
+            .joinToString("&") { "keywords=${java.net.URLEncoder.encode(it, "UTF-8")}" }
+
+        val urlStr = buildString {
+            append("https://api.deepgram.com/v1/listen")
+            append("?model=nova-2&language=en-IN&smart_format=true&punctuate=true")
+            if (keywordParam.isNotEmpty()) append("&$keywordParam")
+        }
+
+        val request = okhttp3.Request.Builder()
+            .url(urlStr)
+            .addHeader("Authorization", "Token $apiKey")
+            .addHeader("Content-Type", "audio/wav")
+            .post(wavData.toRequestBody("audio/wav".toMediaType()))
+            .build()
+
+        val response = httpClient.newCall(request).execute()
+        if (!response.isSuccessful) {
+            val err = response.body?.string() ?: "HTTP ${response.code}"
+            Log.e(TAG, "Deepgram error ${response.code}: ${err.take(200)}")
+            return null
+        }
+
+        val body = response.body?.string() ?: return null
+        return try {
+            val root = org.json.JSONObject(body)
+            root.getJSONObject("results")
+                .getJSONArray("channels")
+                .getJSONObject(0)
+                .getJSONArray("alternatives")
+                .getJSONObject(0)
+                .optString("transcript", "")
+                .trim()
+                .ifBlank { null }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse Deepgram response", e)
+            null
+        }
+    }
+
+    /**
+     * Load all contact first names from the phone's contacts for STT keyword biasing.
+     * Returns a list like ["Rahul", "Priya", "Arjun", ...] — passed to Deepgram
+     * so the STT engine recognises these names correctly instead of mishearing them.
+     */
+    private fun loadContactKeywords(context: Context): List<String> {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS)
+            != PackageManager.PERMISSION_GRANTED) return emptyList()
+
+        val names = mutableSetOf<String>()
+        var cursor: Cursor? = null
+        try {
+            cursor = context.contentResolver.query(
+                ContactsContract.Contacts.CONTENT_URI,
+                arrayOf(ContactsContract.Contacts.DISPLAY_NAME_PRIMARY),
+                null, null,
+                "${ContactsContract.Contacts.DISPLAY_NAME_PRIMARY} ASC"
+            )
+            cursor?.let {
+                val col = it.getColumnIndex(ContactsContract.Contacts.DISPLAY_NAME_PRIMARY)
+                while (it.moveToNext()) {
+                    val fullName = if (col >= 0) it.getString(col) else null
+                    if (!fullName.isNullOrBlank()) {
+                        // Add both full name and first name as keywords
+                        names.add(fullName.trim())
+                        fullName.trim().split(" ").firstOrNull()
+                            ?.takeIf { n -> n.length > 2 }
+                            ?.let { fn -> names.add(fn) }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load contact keywords", e)
+        } finally {
+            cursor?.close()
+        }
+        Log.d(TAG, "Loaded ${names.size} contact keywords for STT biasing")
+        return names.toList()
     }
 
     /**
@@ -782,26 +889,17 @@ object NovaVoicePipeline {
         pushAuraState(PipelineState.SPEAKING)
         WakeWordService.updateStatus("Nova is speaking...")
 
-        // Forward TTS amplitude to overlay for audio-reactive aura
-        val ampJob = scope?.launch {
-            ElevenLabsTTS.amplitude.collect { amp ->
-                AuraOverlayService.updateAmplitude(amp)
-            }
-        }
-
         scope?.launch {
             ElevenLabsTTS.speak(
                 text = text,
                 onStart = { Log.d(TAG, "TTS playback started") },
                 onComplete = {
                     Log.d(TAG, "TTS playback complete — turn $turnCount")
-                    ampJob?.cancel()
                     AuraOverlayService.updateAmplitude(0f)
                     startFollowUpListening()
                 },
                 onError = { error ->
                     Log.e(TAG, "TTS error: $error")
-                    ampJob?.cancel()
                     AuraOverlayService.updateAmplitude(0f)
                     endSession()
                 }

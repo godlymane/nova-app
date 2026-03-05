@@ -18,21 +18,35 @@ val NovaAccent = Color(0xFFA78BFA)
 val NovaText = Color(0xFFE2E8F0)
 
 private val NovaDarkColorScheme = darkColorScheme(
-    primary = NovaBlue,
+    primary = NovaPurpleCore,
     onPrimary = Color.White,
-    primaryContainer = NovaBlueDark,
-    onPrimaryContainer = Color.White,
-    secondary = NovaTextSecondary,
+    primaryContainer = NovaPurpleDeep,
+    onPrimaryContainer = NovaPurpleGlow,
+    secondary = NovaPurpleAmbient,
     onSecondary = Color.White,
+    secondaryContainer = NovaPurpleSubtle,
+    onSecondaryContainer = NovaPurpleGlow,
+    tertiary = NovaCyan,
+    onTertiary = Color.Black,
+    tertiaryContainer = NovaCyanDim,
+    onTertiaryContainer = NovaCyan,
     background = NovaBlack,
     onBackground = NovaTextPrimary,
     surface = NovaSurface,
     onSurface = NovaTextPrimary,
-    surfaceVariant = NovaSurfaceVariant,
+    surfaceVariant = NovaSurfaceCard,
     onSurfaceVariant = NovaTextSecondary,
-    outline = NovaTextDim,
+    surfaceTint = NovaPurpleCore,
+    outline = Color(0xFF2A2A2E),
+    outlineVariant = Color(0xFF1E1E22),
     error = NovaRed,
-    onError = Color.White
+    onError = Color.White,
+    errorContainer = NovaRedDim,
+    onErrorContainer = NovaRed,
+    inverseSurface = NovaTextPrimary,
+    inverseOnSurface = NovaBlack,
+    inversePrimary = NovaPurpleDeep,
+    scrim = Color(0xCC000000)
 )
 
 @Composable
@@ -42,8 +56,8 @@ fun NovaTheme(content: @Composable () -> Unit) {
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
-            window.statusBarColor = NovaBlack.toArgb()
-            window.navigationBarColor = NovaBlack.toArgb()
+            window.statusBarColor = NovaTrueBlack.toArgb()
+            window.navigationBarColor = NovaTrueBlack.toArgb()
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
             WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = false
         }

@@ -20,9 +20,13 @@ import com.nova.companion.data.entity.*
         LearnedRoutine::class,
         ContactAlias::class,
         GraphNode::class,
-        GraphEdge::class
+        GraphEdge::class,
+        Expense::class,
+        FitnessLog::class,
+        NovaTask::class,
+        SmartRoutine::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class NovaDatabase : RoomDatabase() {
@@ -36,15 +40,15 @@ abstract class NovaDatabase : RoomDatabase() {
     abstract fun learnedRoutineDao(): LearnedRoutineDao
     abstract fun contactAliasDao(): ContactAliasDao
     abstract fun knowledgeGraphDao(): KnowledgeGraphDao
+    abstract fun expenseDao(): ExpenseDao
+    abstract fun fitnessDao(): FitnessDao
+    abstract fun taskDao(): TaskDao
+    abstract fun smartRoutineDao(): SmartRoutineDao
 
     companion object {
         @Volatile
         private var INSTANCE: NovaDatabase? = null
 
-        /**
-         * Migration from v3 to v4: adds embedding BLOB column to memories table.
-         * This prevents data loss — fallbackToDestructiveMigration wiped everything before.
-         */
         private val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE memories ADD COLUMN embedding BLOB")
@@ -81,10 +85,6 @@ abstract class NovaDatabase : RoomDatabase() {
             }
         }
 
-        /**
-         * Migration v6 → v7: Knowledge Graph (GraphRAG)
-         * Adds graph_nodes and graph_edges tables for structured semantic memory.
-         */
         private val MIGRATION_6_7 = object : Migration(6, 7) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("""
@@ -101,7 +101,6 @@ abstract class NovaDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE UNIQUE INDEX IF NOT EXISTS index_graph_nodes_label_type ON graph_nodes (label, type)"
                 )
-
                 db.execSQL("""
                     CREATE TABLE IF NOT EXISTS graph_edges (
                         id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -128,6 +127,71 @@ abstract class NovaDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Migration v7 → v8: Expense tracking, Fitness logs, Task management, Smart routines
+         */
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS expenses (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        amount REAL NOT NULL,
+                        currency TEXT NOT NULL DEFAULT 'INR',
+                        category TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        merchant TEXT NOT NULL DEFAULT '',
+                        paymentMethod TEXT NOT NULL DEFAULT '',
+                        timestamp INTEGER NOT NULL,
+                        isRecurring INTEGER NOT NULL DEFAULT 0,
+                        tags TEXT NOT NULL DEFAULT ''
+                    )
+                """.trimIndent())
+
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS fitness_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        type TEXT NOT NULL,
+                        value REAL NOT NULL,
+                        unit TEXT NOT NULL DEFAULT '',
+                        details TEXT NOT NULL DEFAULT '',
+                        caloriesBurned INTEGER NOT NULL DEFAULT 0,
+                        date TEXT NOT NULL,
+                        timestamp INTEGER NOT NULL
+                    )
+                """.trimIndent())
+
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS nova_tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        priority INTEGER NOT NULL DEFAULT 1,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        category TEXT NOT NULL DEFAULT '',
+                        dueDate INTEGER,
+                        reminder INTEGER,
+                        extractedFrom TEXT NOT NULL DEFAULT '',
+                        createdAt INTEGER NOT NULL,
+                        completedAt INTEGER
+                    )
+                """.trimIndent())
+
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS smart_routines (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        name TEXT NOT NULL,
+                        triggerType TEXT NOT NULL,
+                        triggerConfig TEXT NOT NULL,
+                        actions TEXT NOT NULL,
+                        isEnabled INTEGER NOT NULL DEFAULT 1,
+                        lastRun INTEGER NOT NULL DEFAULT 0,
+                        runCount INTEGER NOT NULL DEFAULT 0,
+                        createdAt INTEGER NOT NULL
+                    )
+                """.trimIndent())
+            }
+        }
+
         fun getInstance(context: Context): NovaDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -135,8 +199,8 @@ abstract class NovaDatabase : RoomDatabase() {
                     NovaDatabase::class.java,
                     "nova_database"
                 )
-                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
-                    .fallbackToDestructiveMigration()  // Last resort for unknown versions
+                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }
             }

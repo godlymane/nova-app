@@ -35,8 +35,8 @@ import com.nova.companion.accessibility.AccessibilityPermissionHelper
 import com.nova.companion.brain.context.ContextEngine
 import com.nova.companion.cloud.CloudConfig
 import com.nova.companion.notification.NovaNotificationPrefs
-import com.nova.companion.overlay.AuraOverlayService
 import com.nova.companion.tools.ToolPermissionHelper
+import com.nova.companion.overlay.AuraOverlayService
 import com.nova.companion.ui.navigation.NovaNavigation
 import com.nova.companion.ui.theme.NovaTheme
 import com.nova.companion.vision.ScreenshotService
@@ -105,11 +105,13 @@ class MainActivity : ComponentActivity() {
         NovaNotificationPrefs(this).recordAppOpen()
         CloudConfig.logStartupDiagnostics()
         checkAccessibilityService()
-        requestOverlayPermission()
         requestBatteryOptimizationExclusion()
 
         // Request ALL permissions in one batch dialog
         requestAllPermissions()
+
+        // Request overlay permission for aura overlay
+        requestOverlayPermission()
 
         // Start WakeWordService only if mic permission already granted
         startServicesIfReady()
@@ -125,12 +127,12 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         NovaNotificationPrefs(this).recordAppOpen()
         checkAccessibilityService()
-        // Start overlay if permission granted
+        // Re-check: user may have granted permissions via Settings
+        startServicesIfReady()
+        // Start aura overlay if overlay permission granted
         if (Settings.canDrawOverlays(this)) {
             AuraOverlayService.start(this)
         }
-        // Re-check: user may have granted permissions via Settings
-        startServicesIfReady()
         // Check if AgentExecutor is waiting for screen capture consent
         checkPendingScreenCaptureRequest()
     }
@@ -149,20 +151,6 @@ class MainActivity : ComponentActivity() {
         }
         // ContextEngine degrades gracefully without permissions
         startContextEngine()
-    }
-
-    private fun requestOverlayPermission() {
-        if (!Settings.canDrawOverlays(this)) {
-            Log.i(TAG, "Requesting SYSTEM_ALERT_WINDOW permission")
-            val intent = Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:$packageName")
-            )
-            startActivity(intent)
-        } else {
-            // Start the overlay service
-            AuraOverlayService.start(this)
-        }
     }
 
     /**
@@ -234,6 +222,25 @@ class MainActivity : ComponentActivity() {
     fun requestScreenCapture() {
         val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
+    }
+
+    /**
+     * Request SYSTEM_ALERT_WINDOW for the aura overlay.
+     * If not granted, opens the system settings page to enable it.
+     */
+    private fun requestOverlayPermission() {
+        if (!Settings.canDrawOverlays(this)) {
+            Log.i(TAG, "Requesting overlay permission for aura overlay")
+            try {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not open overlay permission settings", e)
+            }
+        }
     }
 
     /**

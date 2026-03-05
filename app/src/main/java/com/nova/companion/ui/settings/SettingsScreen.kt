@@ -1,30 +1,104 @@
 package com.nova.companion.ui.settings
 
 import android.app.TimePickerDialog
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.nova.companion.data.NovaDatabase
 import com.nova.companion.data.entity.ContactAlias
 import com.nova.companion.notification.NotificationScheduler
 import com.nova.companion.notification.NovaNotificationPrefs
 import com.nova.companion.ui.chat.ChatViewModel
-import com.nova.companion.ui.theme.*
+import com.nova.companion.ui.theme.NovaBlack
+import com.nova.companion.ui.theme.NovaBlue
+import com.nova.companion.ui.theme.NovaCyan
+import com.nova.companion.ui.theme.NovaDarkGray
+import com.nova.companion.ui.theme.NovaGlassBorder
+import com.nova.companion.ui.theme.NovaGold
+import com.nova.companion.ui.theme.NovaGreen
+import com.nova.companion.ui.theme.NovaPurpleAmbient
+import com.nova.companion.ui.theme.NovaPurpleCore
+import com.nova.companion.ui.theme.NovaPurpleDeep
+import com.nova.companion.ui.theme.NovaPurpleGlow
+import com.nova.companion.ui.theme.NovaRed
+import com.nova.companion.ui.theme.NovaSurface
+import com.nova.companion.ui.theme.NovaSurfaceCard
+import com.nova.companion.ui.theme.NovaSurfaceElevated
+import com.nova.companion.ui.theme.NovaSurfaceVariant
+import com.nova.companion.ui.theme.NovaTextDim
+import com.nova.companion.ui.theme.NovaTextMuted
+import com.nova.companion.ui.theme.NovaTextPrimary
+import com.nova.companion.ui.theme.NovaTextSecondary
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -53,7 +127,7 @@ fun SettingsScreen(
                         Icon(
                             imageVector = Icons.Default.ArrowBack,
                             contentDescription = "Back",
-                            tint = NovaBlue
+                            tint = NovaPurpleCore
                         )
                     }
                 },
@@ -95,7 +169,7 @@ fun SettingsScreen(
 
                         if (settings.availableModels.isNotEmpty()) {
                             Spacer(modifier = Modifier.height(12.dp))
-                            HorizontalDivider(color = NovaSurfaceVariant)
+                            HorizontalDivider(color = NovaSurfaceVariant.copy(alpha = 0.5f))
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
                                 "Available Models",
@@ -103,17 +177,23 @@ fun SettingsScreen(
                                 color = NovaTextSecondary
                             )
                             settings.availableModels.forEach { file ->
-                                val sizeMb = if (file.isDirectory) {
-                                    (file.walkBottomUp().filter { it.isFile }.sumOf { it.length() } / 1_000_000)
+                                val sizeBytes = if (file.isDirectory) {
+                                    file.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
                                 } else {
-                                    file.length() / 1_000_000
+                                    file.length()
+                                }
+                                val sizeLabel = when {
+                                    sizeBytes >= 1_000_000_000L -> String.format("%.1f GB", sizeBytes / 1_000_000_000.0)
+                                    sizeBytes >= 1_000_000L -> String.format("%.1f MB", sizeBytes / 1_000_000.0)
+                                    sizeBytes >= 1_000L -> String.format("%.1f KB", sizeBytes / 1_000.0)
+                                    else -> "$sizeBytes B"
                                 }
                                 TextButton(
                                     onClick = { viewModel.loadModel(file.absolutePath) }
                                 ) {
                                     Text(
-                                        "${file.name} (${sizeMb}MB)",
-                                        color = NovaBlue
+                                        "${file.name} ($sizeLabel)",
+                                        color = NovaPurpleCore
                                     )
                                 }
                             }
@@ -142,7 +222,8 @@ fun SettingsScreen(
                             Text(
                                 String.format("%.2f", settings.temperature),
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = NovaBlue
+                                color = NovaPurpleGlow,
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
                         Slider(
@@ -151,14 +232,16 @@ fun SettingsScreen(
                             valueRange = 0.1f..1.5f,
                             steps = 27,
                             colors = SliderDefaults.colors(
-                                thumbColor = NovaBlue,
-                                activeTrackColor = NovaBlue,
-                                inactiveTrackColor = NovaSurfaceVariant
+                                thumbColor = Color.White,
+                                activeTrackColor = NovaPurpleCore,
+                                activeTickColor = NovaPurpleGlow,
+                                inactiveTrackColor = NovaSurfaceVariant,
+                                inactiveTickColor = NovaSurfaceVariant
                             )
                         )
 
                         Spacer(modifier = Modifier.height(12.dp))
-                        HorizontalDivider(color = NovaSurfaceVariant)
+                        HorizontalDivider(color = NovaSurfaceVariant.copy(alpha = 0.5f))
                         Spacer(modifier = Modifier.height(12.dp))
 
                         // Max Tokens
@@ -175,7 +258,8 @@ fun SettingsScreen(
                             Text(
                                 "${settings.maxTokens}",
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = NovaBlue
+                                color = NovaPurpleGlow,
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
                         Slider(
@@ -184,9 +268,11 @@ fun SettingsScreen(
                             valueRange = 50f..512f,
                             steps = 22,
                             colors = SliderDefaults.colors(
-                                thumbColor = NovaBlue,
-                                activeTrackColor = NovaBlue,
-                                inactiveTrackColor = NovaSurfaceVariant
+                                thumbColor = Color.White,
+                                activeTrackColor = NovaPurpleCore,
+                                activeTickColor = NovaPurpleGlow,
+                                inactiveTrackColor = NovaSurfaceVariant,
+                                inactiveTickColor = NovaSurfaceVariant
                             )
                         )
                     }
@@ -204,7 +290,7 @@ fun SettingsScreen(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = NovaRed.copy(alpha = 0.15f),
+                                containerColor = NovaRed.copy(alpha = 0.12f),
                                 contentColor = NovaRed
                             )
                         ) {
@@ -258,13 +344,12 @@ fun SettingsScreen(
                         )
 
                         Spacer(modifier = Modifier.height(12.dp))
-                        HorizontalDivider(color = NovaSurfaceVariant)
+                        HorizontalDivider(color = NovaSurfaceVariant.copy(alpha = 0.5f))
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        // Voice minutes tracking
                         val usagePrefs = LocalContext.current.getSharedPreferences("nova_cloud_usage", 0)
                         val elevenLabsChars = usagePrefs.getLong("elevenlabs_chars_total", 0L)
-                        val estimatedMinutes = (elevenLabsChars / 150.0).toInt() // ~150 chars per minute of speech
+                        val estimatedMinutes = (elevenLabsChars / 150.0).toInt()
                         val remainingMinutes = (250 - estimatedMinutes).coerceAtLeast(0)
 
                         AboutRow("Voice Minutes Used", "~$estimatedMinutes / 250")
@@ -311,7 +396,7 @@ fun SettingsScreen(
                             )
                             if (index < tools.lastIndex) {
                                 HorizontalDivider(
-                                    color = NovaSurfaceVariant,
+                                    color = NovaSurfaceVariant.copy(alpha = 0.4f),
                                     modifier = Modifier.padding(vertical = 4.dp)
                                 )
                             }
@@ -322,7 +407,7 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Cloud API
+            // Cloud API — with status dots
             SettingsSection(title = "Cloud API") {
                 SettingsCard {
                     Column(modifier = Modifier.padding(16.dp)) {
@@ -336,8 +421,9 @@ fun SettingsScreen(
                         val hasElevenLabs = com.nova.companion.cloud.CloudConfig.hasElevenLabsKey()
                         val hasOpenAi = com.nova.companion.cloud.CloudConfig.hasOpenAiKey()
 
-                        AboutRow("ElevenLabs", if (hasElevenLabs) "Connected" else "Not configured")
-                        AboutRow("OpenAI", if (hasOpenAi) "Connected" else "Not configured")
+                        ApiStatusRow("ElevenLabs", hasElevenLabs)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        ApiStatusRow("OpenAI", hasOpenAi)
 
                         Spacer(modifier = Modifier.height(8.dp))
 
@@ -375,38 +461,69 @@ fun SettingsScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // God Mode — Phase 15 Bio-Acoustic Overdrive
-                SettingsCard {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onNavigateToGodMode() }
-                            .padding(16.dp)
-                    ) {
-                        Text(
-                            "⚡ God Mode",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color(0xFFFFD700),
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            "Bio-Acoustic Overdrive Protocol — Vagus, Gamma, Retinal strobe",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = NovaTextSecondary
-                        )
-                    }
-                }
+                // God Mode — animated gradient border banner
+                GodModeBanner(onClick = onNavigateToGodMode)
             }
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // About
+            // About — with Nova logo and version badge
             SettingsSection(title = "About") {
                 SettingsCard {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        AboutRow("App", "Nova Companion")
-                        AboutRow("Version", "0.2.0")
+                        // Nova logo row
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(NovaPurpleDeep, NovaPurpleCore)
+                                        ),
+                                        CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    "N",
+                                    color = NovaPurpleGlow,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    "Nova Companion",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = NovaTextPrimary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                // Version badge
+                                Box(
+                                    modifier = Modifier
+                                        .background(
+                                            NovaPurpleDeep.copy(alpha = 0.3f),
+                                            RoundedCornerShape(4.dp)
+                                        )
+                                        .padding(horizontal = 6.dp, vertical = 1.dp)
+                                ) {
+                                    Text(
+                                        "v0.2.0",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = NovaPurpleGlow,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+                        }
+
+                        HorizontalDivider(color = NovaSurfaceVariant.copy(alpha = 0.4f))
+                        Spacer(modifier = Modifier.height(8.dp))
+
                         AboutRow("Local Engine", "llama.cpp")
                         AboutRow("Cloud LLM", "GPT-4o / Gemini")
                         AboutRow("Voice", "ElevenLabs + Piper")
@@ -444,33 +561,211 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showClearDialog = false }) {
-                    Text("Cancel", color = NovaBlue)
+                    Text("Cancel", color = NovaPurpleCore)
                 }
             },
-            containerColor = NovaDarkGray,
+            containerColor = NovaSurfaceElevated,
             shape = RoundedCornerShape(16.dp)
         )
     }
 }
 
+// -- Section header with gradient accent line --
+
 @Composable
 private fun SettingsSection(title: String, content: @Composable () -> Unit) {
-    Text(
-        text = title.uppercase(),
-        style = MaterialTheme.typography.labelMedium,
-        color = NovaTextDim,
-        modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
-    )
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(start = 4.dp, bottom = 10.dp)
+    ) {
+        // Gradient accent line
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .height(16.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(
+                    Brush.verticalGradient(
+                        listOf(NovaPurpleGlow, NovaPurpleDeep)
+                    )
+                )
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = title.uppercase(),
+            style = MaterialTheme.typography.labelMedium.copy(
+                letterSpacing = 1.sp
+            ),
+            color = NovaTextDim
+        )
+    }
     content()
 }
+
+// -- Card with glass-morphism border --
 
 @Composable
 private fun SettingsCard(content: @Composable () -> Unit) {
     Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = NovaDarkGray
+        shape = RoundedCornerShape(16.dp),
+        color = NovaSurfaceCard,
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(
+                width = 0.5.dp,
+                color = NovaGlassBorder,
+                shape = RoundedCornerShape(16.dp)
+            )
     ) {
         content()
+    }
+}
+
+// -- API status row with animated dot --
+
+@Composable
+private fun ApiStatusRow(label: String, isConnected: Boolean) {
+    val pulse = rememberInfiniteTransition(label = "apiPulse_$label")
+    val dotAlpha by pulse.animateFloat(
+        initialValue = 0.6f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "apiDotAlpha_$label"
+    )
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = NovaTextSecondary
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(
+                        if (isConnected) NovaGreen.copy(alpha = dotAlpha)
+                        else NovaRed.copy(alpha = dotAlpha),
+                        CircleShape
+                    )
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                if (isConnected) "Connected" else "Not configured",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isConnected) NovaGreen else NovaRed.copy(alpha = 0.8f),
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+// -- God Mode banner with animated cycling gradient border --
+
+@Composable
+private fun GodModeBanner(onClick: () -> Unit) {
+    val infiniteTransition = rememberInfiniteTransition(label = "godBorder")
+    val borderPhase by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(3000, easing = LinearEasing)
+        ),
+        label = "godBorderPhase"
+    )
+
+    // Lightning glow pulse
+    val glowScale by infiniteTransition.animateFloat(
+        initialValue = 0.9f,
+        targetValue = 1.1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "godGlow"
+    )
+
+    // Cycling gradient colors based on phase
+    val borderColors = remember(borderPhase) {
+        val colors = listOf(NovaGold, NovaPurpleCore, NovaCyan, NovaGold)
+        val shiftedColors = mutableListOf<Color>()
+        val shift = (borderPhase * colors.size).toInt() % colors.size
+        for (i in colors.indices) {
+            shiftedColors.add(colors[(i + shift) % colors.size])
+        }
+        shiftedColors
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(
+                width = 1.5.dp,
+                brush = Brush.sweepGradient(borderColors),
+                shape = RoundedCornerShape(16.dp)
+            )
+            .clip(RoundedCornerShape(16.dp))
+            .background(NovaSurfaceCard)
+            .clickable(onClick = onClick)
+            .padding(16.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            // Lightning icon with glow
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.size(36.dp)
+            ) {
+                // Glow behind
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .scale(glowScale)
+                        .drawBehind {
+                            drawCircle(
+                                brush = Brush.radialGradient(
+                                    listOf(
+                                        NovaGold.copy(alpha = 0.3f),
+                                        Color.Transparent
+                                    )
+                                ),
+                                radius = size.minDimension / 2f
+                            )
+                        }
+                )
+                Text(
+                    text = "\u26A1",
+                    fontSize = 20.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "God Mode",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = NovaGold,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Bio-Acoustic Overdrive Protocol",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = NovaTextSecondary
+                )
+            }
+        }
     }
 }
 
@@ -479,7 +774,7 @@ private fun AboutRow(label: String, value: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp),
+            .padding(vertical = 5.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(
@@ -495,7 +790,7 @@ private fun AboutRow(label: String, value: String) {
     }
 }
 
-// ── Contact Alias Settings ────────────────────────────────────────
+// -- Contact Alias Settings --
 
 @Composable
 private fun ContactAliasSection() {
@@ -506,7 +801,6 @@ private fun ContactAliasSection() {
     var aliases by remember { mutableStateOf<List<ContactAlias>>(emptyList()) }
     var showAddDialog by remember { mutableStateOf(false) }
 
-    // Load aliases
     LaunchedEffect(Unit) {
         aliases = dao.getAll()
     }
@@ -538,7 +832,7 @@ private fun ContactAliasSection() {
                                 Text(
                                     "\"${alias.alias}\"",
                                     style = MaterialTheme.typography.bodyMedium,
-                                    color = NovaBlue,
+                                    color = NovaPurpleCore,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
@@ -563,7 +857,7 @@ private fun ContactAliasSection() {
                         }
                         if (index < aliases.lastIndex) {
                             HorizontalDivider(
-                                color = NovaSurfaceVariant,
+                                color = NovaSurfaceVariant.copy(alpha = 0.4f),
                                 modifier = Modifier.padding(vertical = 4.dp)
                             )
                         }
@@ -577,8 +871,8 @@ private fun ContactAliasSection() {
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = NovaBlue.copy(alpha = 0.15f),
-                        contentColor = NovaBlue
+                        containerColor = NovaPurpleDeep.copy(alpha = 0.2f),
+                        contentColor = NovaPurpleCore
                     )
                 ) {
                     Text("+ Add Alias")
@@ -587,7 +881,6 @@ private fun ContactAliasSection() {
         }
     }
 
-    // Add alias dialog
     if (showAddDialog) {
         var aliasName by remember { mutableStateOf("") }
         var contactName by remember { mutableStateOf("") }
@@ -606,9 +899,9 @@ private fun ContactAliasSection() {
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedTextColor = Color.White,
                             unfocusedTextColor = Color.White,
-                            focusedBorderColor = NovaBlue,
+                            focusedBorderColor = NovaPurpleCore,
                             unfocusedBorderColor = NovaSurfaceVariant,
-                            focusedLabelColor = NovaBlue,
+                            focusedLabelColor = NovaPurpleCore,
                             unfocusedLabelColor = NovaTextSecondary
                         ),
                         modifier = Modifier.fillMaxWidth()
@@ -622,9 +915,9 @@ private fun ContactAliasSection() {
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedTextColor = Color.White,
                             unfocusedTextColor = Color.White,
-                            focusedBorderColor = NovaBlue,
+                            focusedBorderColor = NovaPurpleCore,
                             unfocusedBorderColor = NovaSurfaceVariant,
-                            focusedLabelColor = NovaBlue,
+                            focusedLabelColor = NovaPurpleCore,
                             unfocusedLabelColor = NovaTextSecondary
                         ),
                         modifier = Modifier.fillMaxWidth()
@@ -638,9 +931,9 @@ private fun ContactAliasSection() {
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedTextColor = Color.White,
                             unfocusedTextColor = Color.White,
-                            focusedBorderColor = NovaBlue,
+                            focusedBorderColor = NovaPurpleCore,
                             unfocusedBorderColor = NovaSurfaceVariant,
-                            focusedLabelColor = NovaBlue,
+                            focusedLabelColor = NovaPurpleCore,
                             unfocusedLabelColor = NovaTextSecondary
                         ),
                         modifier = Modifier.fillMaxWidth()
@@ -666,7 +959,7 @@ private fun ContactAliasSection() {
                     },
                     enabled = aliasName.isNotBlank() && contactName.isNotBlank()
                 ) {
-                    Text("Add", color = NovaBlue)
+                    Text("Add", color = NovaPurpleCore)
                 }
             },
             dismissButton = {
@@ -674,13 +967,13 @@ private fun ContactAliasSection() {
                     Text("Cancel", color = NovaTextSecondary)
                 }
             },
-            containerColor = NovaDarkGray,
+            containerColor = NovaSurfaceElevated,
             shape = RoundedCornerShape(16.dp)
         )
     }
 }
 
-// ── Notification Settings ─────────────────────────────────────────
+// -- Notification Settings --
 
 @Composable
 private fun NotificationSettingsSection() {
@@ -708,7 +1001,6 @@ private fun NotificationSettingsSection() {
     SettingsSection(title = "Notifications") {
         SettingsCard {
             Column(modifier = Modifier.padding(16.dp)) {
-                // Master toggle
                 NotifToggleRow(
                     label = "Enable Notifications",
                     subtitle = "Master toggle for all Nova check-ins",
@@ -725,114 +1017,54 @@ private fun NotificationSettingsSection() {
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Daily check-ins card
         SettingsCard {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
                     "DAILY CHECK-INS",
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.sp),
                     color = NovaTextDim,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
 
                 NotifTimeRow(
-                    label = "Morning",
-                    time = morningTime,
-                    enabled = morningEnabled,
-                    masterEnabled = masterEnabled,
-                    onToggle = {
-                        morningEnabled = it
-                        prefs.morningEnabled = it
-                        reschedule()
-                    },
-                    onTimeChange = {
-                        morningTime = it
-                        prefs.morningTime = it
-                        reschedule()
-                    }
+                    label = "Morning", time = morningTime,
+                    enabled = morningEnabled, masterEnabled = masterEnabled,
+                    onToggle = { morningEnabled = it; prefs.morningEnabled = it; reschedule() },
+                    onTimeChange = { morningTime = it; prefs.morningTime = it; reschedule() }
                 )
-
-                HorizontalDivider(color = NovaSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-
+                HorizontalDivider(color = NovaSurfaceVariant.copy(alpha = 0.4f), modifier = Modifier.padding(vertical = 8.dp))
                 NotifTimeRow(
-                    label = "Lunch",
-                    time = lunchTime,
-                    enabled = lunchEnabled,
-                    masterEnabled = masterEnabled,
-                    onToggle = {
-                        lunchEnabled = it
-                        prefs.lunchEnabled = it
-                        reschedule()
-                    },
-                    onTimeChange = {
-                        lunchTime = it
-                        prefs.lunchTime = it
-                        reschedule()
-                    }
+                    label = "Lunch", time = lunchTime,
+                    enabled = lunchEnabled, masterEnabled = masterEnabled,
+                    onToggle = { lunchEnabled = it; prefs.lunchEnabled = it; reschedule() },
+                    onTimeChange = { lunchTime = it; prefs.lunchTime = it; reschedule() }
                 )
-
-                HorizontalDivider(color = NovaSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-
+                HorizontalDivider(color = NovaSurfaceVariant.copy(alpha = 0.4f), modifier = Modifier.padding(vertical = 8.dp))
                 NotifTimeRow(
-                    label = "Pre-Gym",
-                    time = gymTime,
-                    enabled = gymEnabled,
-                    masterEnabled = masterEnabled,
-                    onToggle = {
-                        gymEnabled = it
-                        prefs.gymEnabled = it
-                        reschedule()
-                    },
-                    onTimeChange = {
-                        gymTime = it
-                        prefs.gymTime = it
-                        reschedule()
-                    }
+                    label = "Pre-Gym", time = gymTime,
+                    enabled = gymEnabled, masterEnabled = masterEnabled,
+                    onToggle = { gymEnabled = it; prefs.gymEnabled = it; reschedule() },
+                    onTimeChange = { gymTime = it; prefs.gymTime = it; reschedule() }
                 )
-
-                HorizontalDivider(color = NovaSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-
+                HorizontalDivider(color = NovaSurfaceVariant.copy(alpha = 0.4f), modifier = Modifier.padding(vertical = 8.dp))
                 NotifTimeRow(
-                    label = "Dinner",
-                    time = dinnerTime,
-                    enabled = dinnerEnabled,
-                    masterEnabled = masterEnabled,
-                    onToggle = {
-                        dinnerEnabled = it
-                        prefs.dinnerEnabled = it
-                        reschedule()
-                    },
-                    onTimeChange = {
-                        dinnerTime = it
-                        prefs.dinnerTime = it
-                        reschedule()
-                    }
+                    label = "Dinner", time = dinnerTime,
+                    enabled = dinnerEnabled, masterEnabled = masterEnabled,
+                    onToggle = { dinnerEnabled = it; prefs.dinnerEnabled = it; reschedule() },
+                    onTimeChange = { dinnerTime = it; prefs.dinnerTime = it; reschedule() }
                 )
-
-                HorizontalDivider(color = NovaSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-
+                HorizontalDivider(color = NovaSurfaceVariant.copy(alpha = 0.4f), modifier = Modifier.padding(vertical = 8.dp))
                 NotifTimeRow(
-                    label = "Night",
-                    time = nightTime,
-                    enabled = nightEnabled,
-                    masterEnabled = masterEnabled,
-                    onToggle = {
-                        nightEnabled = it
-                        prefs.nightEnabled = it
-                        reschedule()
-                    },
-                    onTimeChange = {
-                        nightTime = it
-                        prefs.nightTime = it
-                        reschedule()
-                    }
+                    label = "Night", time = nightTime,
+                    enabled = nightEnabled, masterEnabled = masterEnabled,
+                    onToggle = { nightEnabled = it; prefs.nightEnabled = it; reschedule() },
+                    onTimeChange = { nightTime = it; prefs.nightTime = it; reschedule() }
                 )
             }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Smart triggers card
         SettingsCard {
             Column(modifier = Modifier.padding(16.dp)) {
                 NotifToggleRow(
@@ -859,6 +1091,13 @@ private fun NotifToggleRow(
     onCheckedChange: (Boolean) -> Unit,
     enabled: Boolean = true
 ) {
+    // Spring animation for the switch
+    val thumbScale by animateFloatAsState(
+        targetValue = if (checked) 1f else 0.9f,
+        animationSpec = spring(stiffness = Spring.StiffnessMedium),
+        label = "switchThumb"
+    )
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -884,10 +1123,11 @@ private fun NotifToggleRow(
             enabled = enabled,
             colors = SwitchDefaults.colors(
                 checkedThumbColor = Color.White,
-                checkedTrackColor = NovaBlue,
+                checkedTrackColor = NovaPurpleCore,
                 uncheckedThumbColor = NovaTextSecondary,
                 uncheckedTrackColor = NovaSurfaceVariant
-            )
+            ),
+            modifier = Modifier.scale(thumbScale)
         )
     }
 }
@@ -924,7 +1164,6 @@ private fun NotifTimeRow(
             modifier = Modifier.weight(1f)
         )
 
-        // Time picker
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
@@ -945,14 +1184,14 @@ private fun NotifTimeRow(
             Icon(
                 Icons.Default.Schedule,
                 contentDescription = "Set time",
-                tint = if (masterEnabled) NovaBlue else NovaTextDim,
+                tint = if (masterEnabled) NovaPurpleCore else NovaTextDim,
                 modifier = Modifier.size(14.dp)
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text(
                 text = formatTime12h(hour, minute),
                 style = MaterialTheme.typography.bodySmall,
-                color = if (masterEnabled) NovaBlue else NovaTextDim
+                color = if (masterEnabled) NovaPurpleCore else NovaTextDim
             )
         }
 
@@ -964,7 +1203,7 @@ private fun NotifTimeRow(
             enabled = masterEnabled,
             colors = SwitchDefaults.colors(
                 checkedThumbColor = Color.White,
-                checkedTrackColor = NovaBlue,
+                checkedTrackColor = NovaPurpleCore,
                 uncheckedThumbColor = NovaTextSecondary,
                 uncheckedTrackColor = NovaSurfaceVariant
             )

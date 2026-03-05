@@ -31,7 +31,10 @@ import androidx.core.app.NotificationCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
@@ -55,8 +58,13 @@ import com.nova.companion.ui.aura.AuraState
  *   - Swipe down:  Dismiss/hide overlay temporarily
  *
  * Uses SYSTEM_ALERT_WINDOW (TYPE_APPLICATION_OVERLAY) for cross-app visibility.
+ *
+ * Fixes:
+ * - Implements ViewModelStoreOwner so ComposeView doesn't crash in newer Compose versions
+ * - onStartCommand returns START_STICKY so Android restarts after killing
+ * - isRunning() guard prevents double-adding the overlay window
  */
-class AuraOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
+class AuraOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner {
 
     companion object {
         private const val TAG = "AuraOverlay"
@@ -68,7 +76,7 @@ class AuraOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
         private const val PILL_HEIGHT_DORMANT_DP = 12
         private const val PILL_WIDTH_ACTIVE_DP = 200
         private const val PILL_HEIGHT_ACTIVE_DP = 44
-        private const val PILL_MARGIN_TOP_DP = 8
+        private const val PILL_MARGIN_TOP_DP = 12  // extra margin so it's below status bar
 
         // ── Shared state (updated from ChatViewModel) ──
         private val _auraState = mutableStateOf(AuraState.DORMANT)
@@ -76,6 +84,8 @@ class AuraOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
 
         @Volatile
         private var instance: AuraOverlayService? = null
+
+        fun isRunning(): Boolean = instance != null
 
         fun updateAuraState(state: AuraState) {
             _auraState.value = state
@@ -111,6 +121,9 @@ class AuraOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
     private lateinit var lifecycleRegistry: LifecycleRegistry
     private lateinit var savedStateRegistryController: SavedStateRegistryController
 
+    // ViewModelStoreOwner required by ComposeView in newer Compose versions
+    override val viewModelStore: ViewModelStore = ViewModelStore()
+
     // Current pill pixel dimensions for animation
     private var currentWidthPx = 0
     private var currentHeightPx = 0
@@ -137,6 +150,14 @@ class AuraOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
         setupOverlay()
         setupEdgeGlow()
         lifecycleRegistry.currentState = Lifecycle.State.RESUMED
+        Log.i(TAG, "AuraOverlayService created and overlay added")
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // If we're already running (overlay already added), just return — don't double-add
+        // This is called every time AuraOverlayService.start() is called (e.g. from onResume)
+        Log.d(TAG, "onStartCommand — already running, overlay stays put")
+        return START_STICKY
     }
 
     private fun setupOverlay() {
@@ -170,6 +191,7 @@ class AuraOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
         overlayView = ComposeView(this).apply {
             setViewTreeLifecycleOwner(this@AuraOverlayService)
             setViewTreeSavedStateRegistryOwner(this@AuraOverlayService)
+            setViewTreeViewModelStoreOwner(this@AuraOverlayService)
             setLayerType(View.LAYER_TYPE_HARDWARE, null)
             clipToOutline = true
             setContent {
@@ -197,7 +219,6 @@ class AuraOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
      * Only visible when Nova is LISTENING/THINKING/SPEAKING.
      */
     private fun setupEdgeGlow() {
-        val dm = resources.displayMetrics
         val glowParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -215,6 +236,7 @@ class AuraOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
         glowView = ComposeView(this).apply {
             setViewTreeLifecycleOwner(this@AuraOverlayService)
             setViewTreeSavedStateRegistryOwner(this@AuraOverlayService)
+            setViewTreeViewModelStoreOwner(this@AuraOverlayService)
             setLayerType(View.LAYER_TYPE_HARDWARE, null)
             setContent {
                 val state = _auraState.value
@@ -376,6 +398,7 @@ class AuraOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
         instance = null
         sizeAnimator?.cancel()
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
+        viewModelStore.clear()
         try { overlayView?.let { windowManager?.removeView(it) } } catch (e: Exception) {
             Log.w(TAG, "Error removing overlay", e)
         }

@@ -2,7 +2,12 @@ package com.nova.companion.cloud
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -15,12 +20,6 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.nova.companion.core.SystemPrompt
 import com.google.gson.JsonParser
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -205,8 +204,8 @@ You roast when he's slacking [sarcastic]. You hype when he's grinding [excited].
             .build()
 
         val fullResponse = StringBuilder()
-        @Volatile var lastTokenTime = System.currentTimeMillis()
-        @Volatile var streamDone = false
+        var lastTokenTime = System.currentTimeMillis()
+        var streamDone = false
         var timeoutJob: Job? = null
 
         val listener = object : EventSourceListener() {

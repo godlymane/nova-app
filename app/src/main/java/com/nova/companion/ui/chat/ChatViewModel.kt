@@ -20,13 +20,13 @@ import com.nova.companion.data.NovaDatabase
 import com.nova.companion.inference.NovaInference
 import com.nova.companion.inference.NovaInference.ModelState
 import com.nova.companion.memory.MemoryManager
-import com.nova.companion.overlay.AuraOverlayService
 import com.nova.companion.accessibility.ScreenContext
 import com.nova.companion.brain.context.ContextInjector
 import com.nova.companion.brain.emotion.NovaEmotionEngine
 import com.nova.companion.data.entity.LearnedRoutine
 import com.nova.companion.routines.RecordedStep
 import com.nova.companion.routines.RoutineRecorder
+import com.nova.companion.overlay.AuraOverlayService
 import com.nova.companion.overlay.bubble.TaskBubbleService
 import com.nova.companion.overlay.bubble.TaskProgressManager
 import com.nova.companion.tools.ToolRegistry
@@ -231,7 +231,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Forward aura state to overlay service + widget
+        // Forward aura state to overlay + widget
         viewModelScope.launch {
             auraState.collect { state ->
                 AuraOverlayService.updateAuraState(state)
@@ -242,24 +242,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Forward TTS amplitude to overlay for SPEAKING visualization
+        // Forward speaking amplitude to overlay
         viewModelScope.launch {
-            speakingAmplitude.collect { amp ->
+            voicePipeline.speakingAmplitude.collect { amp ->
                 AuraOverlayService.updateAmplitude(amp)
             }
         }
 
-        // Wire overlay interactive controls
-        AuraOverlayService.onTapToListen = {
-            viewModelScope.launch { onWakeWordDetected() }
-        }
-        AuraOverlayService.onDoubleTapToStop = {
-            viewModelScope.launch {
-                voicePipeline.stop()
-                generationJob?.cancel()
-                _isGenerating.value = false
-            }
-        }
+        // Wire overlay tap controls
+        AuraOverlayService.onTapToListen = { onWakeWordDetected() }
+        AuraOverlayService.onDoubleTapToStop = { voicePipeline.stop() }
 
         // Resume wake word listening when voice pipeline returns to IDLE
         viewModelScope.launch {
